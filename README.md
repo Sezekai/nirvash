@@ -4,7 +4,7 @@ A simple, lossless-first video tool.
 
 **Stage 1 (this build):**
 
-- **Find music** — scan folders of videos, find the music (CLAP model), and copy it into the song library without re-encoding. Videos with talking keep only their music sections, tagged *Partial — check*. The same song found in several videos is merged, keeping the best copy.
+- **Find music** — scan folders of videos, find the music (AudioSet audio tagger), and copy it into the song library without re-encoding. Videos with talking keep only their music sections, tagged *Partial — check*. The same song found in several videos is merged, keeping the best copy.
 - **Song library** — listen, favourite, categorise, delete (Recycle Bin). Songs are identified in the background with Shazam (AcoustID as an optional backup), with full length, genre and year from iTunes/MusicBrainz and lyrics from LRCLIB.
 - **Auto-music** — pick a folder of silent videos; Nirvash picks a song for each one by length, pace and mood, then you review, swap and export. The video stream is always copied untouched.
 
@@ -14,7 +14,7 @@ A simple, lossless-first video tool.
 
 1. Download the latest build (GitHub → Actions → newest run → *Artifacts*, or a Release zip).
 2. Extract so the program sits at `E:\Pictures\Nirvash\App\Nirvash.exe`.
-3. Run `Nirvash.exe`. On first start it offers to download the CLAP model (~620 MB) into `E:\Pictures\Nirvash\Models`.
+3. Run `Nirvash.exe`. On first start it offers to download the audio tagger model (~350 MB) into `E:\Pictures\Nirvash\Models`.
    CLIP is read from Collection Sorter's copy (`%LOCALAPPDATA%\Collection Sorter\models\clip`); if that's ever gone, Nirvash offers to download its own.
 
 Updating = replace the `App` folder. Nothing else is touched.
