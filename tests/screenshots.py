@@ -130,7 +130,9 @@ def shoot():
         import base64
         for n in ("auto_screen.jpg", "library_screen.jpg"):
             print(f"B64START {n}")
-            print(base64.b64encode((OUT / n).read_bytes()).decode())
+            b = base64.b64encode((OUT / n).read_bytes()).decode()
+            for i in range(0, len(b), 3000):
+                print(b[i:i + 3000], flush=True)
             print(f"B64END {n}")
     w.library.select_song(1)
     app.processEvents()
