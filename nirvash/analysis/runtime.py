@@ -39,7 +39,8 @@ def make_session(path: Path, device: str = "auto"):
                 so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
             with _lock:
                 sess = ort.InferenceSession(str(path), sess_options=so, providers=[prov])
-            return sess, prov
+            actual = (sess.get_providers() or [prov])[0]
+            return sess, actual
         except Exception as e:  # pragma: no cover - depends on the machine
             last = e
             log.warning("could not load %s on %s: %s", path.name, prov, e)

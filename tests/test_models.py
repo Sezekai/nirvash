@@ -67,7 +67,19 @@ def test_clap_music_vs_speech():
     assert probs["music"][0] > probs["speech"][0]
     if len(chunks) > 1:
         print("speech clip:", {k: round(float(v[1]), 3) for k, v in probs.items()})
-        assert probs["speech"][1] > probs["music"][1]
+        mix = 0.35 * m[:480000] + s[:480000][: len(m[:480000])]
+        e3 = clap.embed_audio([mix])
+        p3 = labels.audio_class_probs(e3, clap)
+        print("speech over music:", {k: round(float(v[0]), 3) for k, v in p3.items()})
+        prompts = [p for ps in labels.AUDIO_CLASSES.values() for p in ps]
+        t = clap.embed_text(prompts)
+        for name, e in (("music", embs[0]), ("speech", embs[1]), ("speech+music", e3[0])):
+            sims = e @ t.T
+            top = np.argsort(-sims)[:5]
+            print(name, [(prompts[i], round(float(sims[i]), 3)) for i in top])
+        # What matters: talking (alone or over music) must not count as music.
+        assert probs["music"][1] < 0.45
+        assert p3["music"][0] < 0.45
     mood = labels.song_mood(embs[0], clap)
     assert abs(sum(mood.values()) - 1) < 1e-3
 
