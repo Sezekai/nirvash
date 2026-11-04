@@ -185,7 +185,7 @@ class ChipDelegate(QStyledItemDelegate):
                     chips.append(self.m.cat_info[cid])
         else:
             if r["partial"] and not r["checked"]:
-                chips.append(("Partial — check", C["pink"]))
+                chips.append(("Check", C["pink"]))
             if r["status"] in STATUS:
                 chips.append(STATUS[r["status"]])
         p.save()
@@ -299,7 +299,7 @@ class DetailPanel(QScrollArea):
         chips = QHBoxLayout()
         chips.setSpacing(5)
         if r["partial"] and not r["checked"]:
-            chips.addWidget(chip("Partial — check", C["pink"]))
+            chips.addWidget(chip("To check", C["pink"]))
         if r["genre"]:
             chips.addWidget(chip(r["genre"].split(",")[0], C["teal"]))
         if r["bpm"]:
@@ -456,7 +456,7 @@ class LibraryPage(QWidget):
         self.views = QListWidget()
         self.views.setFixedHeight(4 * 36 + 10)
         for key, text, ic, col in (("all", "All songs", "library", C["teal"]), ("fav", "Favourites", "star_on", C["amber"]),
-                                    ("partial", "Partial — check", "info", C["pink"]),
+                                    ("partial", "To check", "info", C["pink"]),
                                     ("unid", "Not identified", "scan", C["violet"])):
             it = QListWidgetItem(icon(ic, col, 16), text)
             it.setData(Qt.UserRole, key)

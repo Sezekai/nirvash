@@ -53,6 +53,18 @@ jobs:
           $env:PATH = "$PWD\bin;$env:PATH"
           python -m pytest -q -s tests/test_models.py
 
+      - name: UI smoke test with real playback (screenshots)
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\bin;$env:PATH"
+          python tests/screenshots.py "$PWD\shots"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_number }}
+          path: shots
+          retention-days: 7
+
       - name: Build app
         run: pyinstaller --noconfirm --clean --distpath dist --workpath build/work build/nirvash.spec
 

@@ -16,8 +16,10 @@ OUT.mkdir(parents=True, exist_ok=True)
 tmp = Path(tempfile.mkdtemp())
 os.environ["NIRVASH_DATA"] = str(tmp / "data")
 os.environ["NIRVASH_ROOT"] = str(tmp / "root")
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ["NIRVASH_NO_PLAYBACK"] = "1"
+REAL = sys.platform == "win32"   # on Windows (CI) use real playback and grab the screen
+if not REAL:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ["NIRVASH_NO_PLAYBACK"] = "1"
 
 import numpy as np  # noqa: E402
 
@@ -28,7 +30,7 @@ s = get_settings()
 songs_dir = s.folder("songs")
 vids = tmp / "silent"
 vids.mkdir()
-src = Path("/tmp/nv-media")
+src = Path(tempfile.gettempdir()) / "nv-media"
 if not (src / "song.m4a").exists():
     src.mkdir(exist_ok=True)
     subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=f=220:d=60", "-f", "lavfi", "-i", "sine=f=330:d=60",
@@ -96,7 +98,33 @@ w.resize(1480, 900)
 w.show()
 
 
+def wait(sec: float):
+    import time
+    end = time.time() + sec
+    while time.time() < end:
+        app.processEvents()
+        time.sleep(0.03)
+
+
 def shoot():
+    if REAL:
+        w.go("auto")
+        w.auto_page.table.selectRow(0)
+        for _ in range(300):
+            wait(0.1)
+            if w.auto_page.player.duration() > 0 and not w.auto_page.status.text():
+                break
+        w.auto_page.player.play()
+        wait(2.5)
+        print("player:", w.auto_page.player.backend, "pos", round(w.auto_page.player.position(), 2),
+              "dur", w.auto_page.player.duration(), "playing", w.auto_page.player.is_playing())
+        app.primaryScreen().grabWindow(0).save(str(OUT / "auto_screen.png"))
+        w.library.select_song(1)
+        w.go("library")
+        w.library.play(1)
+        wait(2.0)
+        print("library player pos", round(w.library.player.position(), 2), "playing", w.library.player.is_playing())
+        app.primaryScreen().grabWindow(0).save(str(OUT / "library_screen.png"))
     w.library.select_song(1)
     app.processEvents()
     for key in ("library", "scan", "auto", "settings"):

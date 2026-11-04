@@ -30,7 +30,12 @@ MAX_DECODE_S = 3600.0
 class Section:
     start: float
     end: float
-    partial: bool
+    partial: bool          # cut out of a longer video with other sound
+    unsure: bool = False   # vocals that might be talking - flag it for checking
+
+    @property
+    def check(self) -> bool:
+        return self.partial or self.unsure
 
     @property
     def length(self) -> float:
@@ -95,8 +100,14 @@ def window_starts(duration: float) -> list[float]:
 
 
 def slot_label(music: float, speech: float, singing: float, speech_t: float) -> str:
-    """Talking anywhere (even over music) rules a stretch out; singing doesn't."""
-    if speech >= speech_t or (speech >= 0.6 * speech_t and speech > singing + 0.15):
+    """Talking anywhere (even over music) rules a stretch out; singing doesn't.
+
+    When the model hears both strong vocals and "speech" in music (rap, spoken parts), it's kept but flagged."""
+    if speech >= speech_t:
+        if music >= 0.4 and singing >= speech - 0.1:
+            return "music?"
+        return "speech"
+    if speech >= 0.6 * speech_t and speech > singing + 0.15:
         return "speech"
     if music >= 0.4:
         return "music"
@@ -137,7 +148,7 @@ def classify(y: np.ndarray, sr: int, duration: float, silence_db: float, tagger)
 
 def find_sections(slot_labels: list[str], duration: float, min_len: float, full_ratio: float) -> tuple[str, list[Section]]:
     n = len(slot_labels)
-    music = [l == "music" for l in slot_labels]
+    music = [l in ("music", "music?") for l in slot_labels]
     audible = [l != "quiet" for l in slot_labels]
     n_music = sum(music)
     n_aud = max(1, sum(audible))
@@ -145,7 +156,7 @@ def find_sections(slot_labels: list[str], duration: float, min_len: float, full_
         return ("silent" if not any(audible) else "speech"), []
     has_speech = any(l == "speech" for l in slot_labels)
     if not has_speech and n_music / n_aud >= full_ratio:
-        return "music", [Section(0.0, duration, False)]
+        return "music", [Section(0.0, duration, False, "music?" in slot_labels)]
     secs: list[Section] = []
     i = 0
     while i < n:
@@ -160,7 +171,7 @@ def find_sections(slot_labels: list[str], duration: float, min_len: float, full_
             if j < n:
                 b -= 1.0
             if b - a >= min_len or (b - a >= 0.8 * duration and b - a > 3):
-                secs.append(Section(round(a, 2), round(b, 2), True))
+                secs.append(Section(round(a, 2), round(b, 2), True, "music?" in slot_labels[i:j]))
             i = j
         else:
             i += 1
@@ -256,7 +267,7 @@ def add_or_merge(video: str, sec: Section, file: Path, sec_probs: np.ndarray, ta
             if better:
                 old_path = Path(old["file_path"])
                 feats = song_features(file, sec_probs, tagger)
-                db.update_song(sid, file_path=str(file), partial=int(sec.partial and bool(old["partial"])),
+                db.update_song(sid, file_path=str(file), partial=int(sec.check and bool(old["partial"])),
                                fingerprint=fp, **info, **feats)
                 idx.add(sid, fp)
                 if old_path.exists() and old_path != file:
@@ -269,7 +280,7 @@ def add_or_merge(video: str, sec: Section, file: Path, sec_probs: np.ndarray, ta
             ctx.event("song_changed", sid)
             return
     feats = song_features(file, sec_probs, tagger)
-    sid = db.add_song(file_path=str(file), partial=int(sec.partial), fingerprint=fp, id_status="pending",
+    sid = db.add_song(file_path=str(file), partial=int(sec.check), fingerprint=fp, id_status="pending",
                       **info, **feats)
     db.add_source(sid, video, sec.start, sec.end)
     if fp is not None:

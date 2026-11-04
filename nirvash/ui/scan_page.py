@@ -105,7 +105,7 @@ class ScanPage(QWidget):
         self.st_videos = Stat("Videos checked", C["text"])
         self.st_added = Stat("Songs added", C["teal"])
         self.st_merged = Stat("Duplicates merged", C["violet"])
-        self.st_partial = Stat("Partial — check", C["pink"])
+        self.st_partial = Stat("To check", C["pink"])
         for w in (self.st_videos, self.st_added, self.st_merged, self.st_partial):
             stats.addWidget(w)
         rl.addLayout(stats)
@@ -245,8 +245,7 @@ class ScanPage(QWidget):
         c["videos"] += 1
         c["added"] += len(r.added)
         c["merged"] += len(r.merged)
-        if r.status == "partial":
-            c["partial"] += len(r.added)
+        c["partial"] += min(len(r.added), sum(1 for sec in r.sections if sec.check))
         self._update_stats()
         if r.status == "skipped" and not self.s.get("scan.rescan"):
             pass
