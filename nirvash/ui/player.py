@@ -69,26 +69,47 @@ class Player(QWidget):
         self._want_play = False
         self._mpv = None
         self._qt = None
-        mpv = _load_mpv()
-        if mpv is not None:
-            try:
-                self._init_mpv(mpv)
-            except Exception as e:
-                log.warning("mpv failed to start (%s); using Qt playback", e)
-                self._mpv = None
-        if self._mpv is None:
+        self._wid = None
+        self._use_mpv = _load_mpv() is not None
+        if self.video_enabled and self._use_mpv:
+            # mpv draws into this widget's own window; it's created on first use, once the widget sits in its
+            # final place (moving a native widget to a new parent replaces its window).
+            self.setAttribute(Qt.WA_DontCreateNativeAncestors)
+            self.setAttribute(Qt.WA_NativeWindow)
+        if not self._use_mpv:
             self._init_qt()
         if not video:
             self.setFixedSize(0, 0)
 
+    def _m(self):
+        """The mpv instance, created (or re-created if our window changed) on demand."""
+        if not self._use_mpv:
+            return None
+        wid = int(self.winId()) if self.video_enabled else None
+        if self._mpv is not None and wid == self._wid:
+            return self._mpv
+        if self._mpv is not None:
+            try:
+                self._mpv.terminate()
+            except Exception:
+                pass
+            self._mpv = None
+        try:
+            self._init_mpv(_load_mpv(), wid)
+            self._wid = wid
+        except Exception as e:
+            log.warning("mpv failed to start (%s); using Qt playback", e)
+            self._use_mpv = False
+            self._mpv = None
+            self._init_qt()
+        return self._mpv
+
     # ---- mpv -------------------------------------------------------------
-    def _init_mpv(self, mpv) -> None:
+    def _init_mpv(self, mpv, wid: int | None) -> None:
         opts = dict(keep_open="yes", idle="yes", input_default_bindings=False, input_vo_keyboard=False, osc=False,
                     loglevel="warn", volume=self._volume, audio_display="no", hr_seek="yes")
         if self.video_enabled:
-            self.setAttribute(Qt.WA_DontCreateNativeAncestors)
-            self.setAttribute(Qt.WA_NativeWindow)
-            opts.update(wid=str(int(self.winId())), vo="gpu", hwdec="auto-safe", keepaspect="yes",
+            opts.update(wid=str(wid), vo="gpu", hwdec="auto-safe", keepaspect="yes",
                         background="color", background_color="#05060a")
         else:
             opts.update(vid="no", force_window="no", vo="null")
@@ -135,16 +156,16 @@ class Player(QWidget):
     # ---- API ---------------------------------------------------------------
     @property
     def backend(self) -> str:
-        return "mpv" if self._mpv is not None else "qt"
+        return "mpv" if self._use_mpv else "qt"
 
     def load(self, path: str, audio_file: str | None = None, play: bool = False, start: float = 0.0) -> None:
-        if self._mpv is None and self._qt is None:
+        if not self._use_mpv and self._qt is None:
             return
         self._want_play = play
         self._start = start
         self._pos = 0.0
-        if self._mpv is not None:
-            m = self._mpv
+        m = self._m()
+        if m is not None:
             m["audio-files"] = [audio_file] if audio_file else []
             m["pause"] = not play
             m["start"] = f"{start:.3f}" if start else "none"
