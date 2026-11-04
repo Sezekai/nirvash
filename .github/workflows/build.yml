@@ -42,9 +42,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/nvroot/Models
-          key: models-clap-unfused-clip-b32-v1
+          key: models-ast-clip-b32-v1
 
-      - name: Tests (real CLAP / CLIP / lookups)
+      - name: Tests (real audio tagger / CLIP / lookups)
         shell: pwsh
         env:
           NIRVASH_MODEL_TESTS: "1"

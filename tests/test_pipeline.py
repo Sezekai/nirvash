@@ -1,4 +1,4 @@
-"""End-to-end test of scanning and auto-music on synthetic media, with a stand-in for CLAP/CLIP."""
+"""End-to-end test of scanning and auto-music on synthetic media, with stand-ins for the AI models."""
 from __future__ import annotations
 
 import os
@@ -40,16 +40,23 @@ def make_music_wav(path: Path, seconds: float, seed: int = 1):
         w.writeframes((np.clip(y, -1, 1) * 32767).astype("<i2").tobytes())
 
 
-class FakeClap:
+class FakeTagger:
+    """Stands in for the AudioSet model: labels windows from a timeline."""
     provider = "fake"
+    timeline = None
+    starts: list = []
 
-    def embed_audio(self, chunks):
-        v = np.ones((len(chunks), 512), np.float32)
-        return v / np.linalg.norm(v, axis=1, keepdims=True)
+    def probs(self, chunks):
+        return np.zeros((len(chunks), 527), np.float32)
 
-    def embed_text(self, texts):
-        v = np.ones((len(texts), 512), np.float32)
-        return v / np.linalg.norm(v, axis=1, keepdims=True)
+    def classes(self, p):
+        lab = [self.timeline(s + 5) for s in self.starts]
+        return {"music": np.array([1.0 if l == "music" else 0.0 for l in lab]),
+                "speech": np.array([1.0 if l == "speech" else 0.0 for l in lab]),
+                "singing": np.zeros(len(lab))}
+
+    def mood(self, p):
+        return {"calm": 0.6, "happy": 0.4}
 
 
 @pytest.fixture()
@@ -96,25 +103,18 @@ def test_scan_and_automusic(env, monkeypatch):
        "anullsrc=r=48000:cl=stereo", "-t", "50", "-c:v", "libvpx-vp9", "-deadline", "realtime", "-b:v", "300k",
        "-c:a", "libopus", str(silent / "D silent track.webm"))
 
-    # Stand-ins: music where the timeline says so.
-    monkeypatch.setattr(scan, "get_clap", lambda: FakeClap())
+    # Stand-in tagger: music where the timeline says so.
+    tagger = FakeTagger()
+    monkeypatch.setattr(scan, "get_tagger", lambda: tagger)
     timeline = {"A music.mp4": lambda t: "music", "B partial.mp4": lambda t: "music" if t < 32 else "speech"}
-
     current = {}
-
-    def fake_probs(embs, clap):
-        name, starts = current["name"], current["starts"]
-        lab = [timeline[name](s + 5) for s in starts]
-        return {k: np.array([1.0 if l == k else 0.0 for l in lab]) for k in ("music", "speech", "other")}
-
     orig_classify = scan.classify
 
-    def classify(y, sr, duration, silence_db, clap):
-        current["starts"] = scan.window_starts(duration)
-        return orig_classify(y, sr, duration, silence_db, clap)
+    def classify(y, sr, duration, silence_db, tg):
+        tg.starts = scan.window_starts(duration)
+        tg.timeline = timeline[current["name"]]
+        return orig_classify(y, sr, duration, silence_db, tg)
 
-    monkeypatch.setattr(scan.labels, "audio_class_probs", fake_probs)
-    monkeypatch.setattr(scan.labels, "song_mood", lambda e, c: {"calm": 0.6, "happy": 0.4})
     monkeypatch.setattr(scan, "classify", classify)
 
     ctx = JobContext()

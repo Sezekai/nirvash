@@ -1,4 +1,4 @@
-"""Real-model checks (CLAP, CLIP, Shazam). Run in CI with NIRVASH_MODEL_TESTS=1; models are downloaded once."""
+"""Real-model checks (AudioSet tagger, CLIP, Shazam). Run in CI with NIRVASH_MODEL_TESTS=1; models are downloaded once."""
 from __future__ import annotations
 
 import os
@@ -24,7 +24,7 @@ def env(tmp_path_factory):
     from nirvash.core import settings as sm
     sm._settings = None
     from nirvash.analysis import models
-    for spec in (models.CLAP, models.CLIP):
+    for spec in (models.AST, models.CLIP):
         if models.model_dir(spec) is None:
             models.download(spec)
     yield
@@ -50,37 +50,33 @@ def speech(sr=48000):
     return ff.decode_audio(out, sr)
 
 
-def test_clap_music_vs_speech():
-    from nirvash.analysis import labels
-    from nirvash.analysis.encoders import get_clap
-    clap = get_clap()
-    m = music()
-    chunks = [m[:480000]]
+def test_tagger_music_speech_and_talk_over_music():
+    from nirvash.analysis import ast
+    from nirvash.jobs.scan import slot_label
+    tg = ast.get_tagger()
+    print("provider", tg.provider)
+    m = music(10.24, 16000)
+    chunks = {"music": m}
     if sys.platform == "win32":
-        s = speech()
-        chunks.append(s[:480000])
-    embs = clap.embed_audio(chunks)
-    assert embs.shape == (len(chunks), 512)
-    assert np.allclose(np.linalg.norm(embs, axis=1), 1, atol=1e-3)
-    probs = labels.audio_class_probs(embs, clap)
-    print("music clip:", {k: round(float(v[0]), 3) for k, v in probs.items()})
-    assert probs["music"][0] > probs["speech"][0]
-    if len(chunks) > 1:
-        print("speech clip:", {k: round(float(v[1]), 3) for k, v in probs.items()})
-        mix = 0.35 * m[:480000] + s[:480000][: len(m[:480000])]
-        e3 = clap.embed_audio([mix])
-        p3 = labels.audio_class_probs(e3, clap)
-        print("speech over music:", {k: round(float(v[0]), 3) for k, v in p3.items()})
-        prompts = [p for ps in labels.AUDIO_CLASSES.values() for p in ps]
-        t = clap.embed_text(prompts)
-        for name, e in (("music", embs[0]), ("speech", embs[1]), ("speech+music", e3[0])):
-            sims = e @ t.T
-            top = np.argsort(-sims)[:5]
-            print(name, [(prompts[i], round(float(sims[i]), 3)) for i in top])
-        # What matters: talking (alone or over music) must not count as music.
-        assert probs["music"][1] < 0.45
-        assert p3["music"][0] < 0.45
-    mood = labels.song_mood(embs[0], clap)
+        s = speech(16000)[: len(m)]
+        chunks["speech"] = s
+        chunks["speech over music"] = 0.35 * m[: len(s)] + s
+        chunks["quiet speech over loud music"] = 0.8 * m[: len(s)] + 0.5 * s
+    p = tg.probs(list(chunks.values()))
+    cls = tg.classes(p)
+    got = {}
+    for i, name in enumerate(chunks):
+        top = np.argsort(-p[i])[:6]
+        print(name, {k: round(float(v[i]), 3) for k, v in cls.items()},
+              [(tg.labels[j], round(float(p[i, j]), 3)) for j in top])
+        got[name] = slot_label(cls["music"][i], cls["speech"][i], cls["singing"][i], 0.5)
+    print("decisions", got)
+    assert got["music"] == "music"
+    if "speech" in got:
+        assert got["speech"] == "speech"
+        assert got["speech over music"] == "speech"
+    mood = tg.mood(p[:1])
+    print("mood", mood)
     assert abs(sum(mood.values()) - 1) < 1e-3
 
 

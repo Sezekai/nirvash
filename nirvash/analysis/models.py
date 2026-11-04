@@ -36,12 +36,11 @@ class ModelSpec:
     approx_mb: int
 
 
-CLAP = ModelSpec(
-    "clap", "CLAP (audio)", "Music vs speech detection and song mood", "clap",
-    (ModelFile("Xenova/clap-htsat-unfused", "onnx/audio_model.onnx", "audio_model.onnx"),
-     ModelFile("Xenova/clap-htsat-unfused", "onnx/text_model.onnx", "text_model.onnx"),
-     ModelFile("Xenova/clap-htsat-unfused", "tokenizer.json", "tokenizer.json")),
-    620)
+AST = ModelSpec(
+    "ast", "Audio tagger (AST, AudioSet)", "Finds music, talking and singing; song mood", "audio-tagger",
+    (ModelFile("Xenova/ast-finetuned-audioset-10-10-0.4593", "onnx/model.onnx", "model.onnx"),
+     ModelFile("Xenova/ast-finetuned-audioset-10-10-0.4593", "config.json", "config.json")),
+    350)
 
 CLIP = ModelSpec(
     "clip", "CLIP ViT-B/32 (images)", "Video mood for auto-matching", "clip",
@@ -49,7 +48,7 @@ CLIP = ModelSpec(
      ModelFile("Xenova/clip-vit-base-patch32", "onnx/text_model.onnx", "text_model.onnx")),
     600)
 
-SPECS = {s.key: s for s in (CLAP, CLIP)}
+SPECS = {s.key: s for s in (AST, CLIP)}
 
 
 def models_root() -> Path:

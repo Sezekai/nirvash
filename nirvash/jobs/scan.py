@@ -10,7 +10,7 @@ import numpy as np
 
 from ..analysis import audio_features as af
 from ..analysis import labels
-from ..analysis.encoders import get_clap
+from ..analysis.ast import SR as TAG_SR, get_tagger
 from ..analysis.fingerprint import FingerprintIndex, fingerprint
 from ..core import log as _log
 from ..core.db import get_db
@@ -21,7 +21,7 @@ from .library_files import ext_for_codec, safe_name, stamp, to_recycle_bin, uniq
 
 log = _log.get("scan")
 
-WIN = 10.0
+WIN = 10.24
 HOP = 5.0
 MAX_DECODE_S = 3600.0
 
@@ -94,37 +94,45 @@ def window_starts(duration: float) -> list[float]:
     return [float(s) for s in starts]
 
 
-def classify(y: np.ndarray, sr: int, duration: float, silence_db: float, clap) -> tuple[list[str], np.ndarray, list[float]]:
-    """Label each 5 s slot as music / speech / other / quiet. Returns (labels, window embeddings, window starts)."""
+def slot_label(music: float, speech: float, singing: float, speech_t: float) -> str:
+    """Talking anywhere (even over music) rules a stretch out; singing doesn't."""
+    if speech >= speech_t or (speech >= 0.6 * speech_t and speech > singing + 0.15):
+        return "speech"
+    if music >= 0.4:
+        return "music"
+    return "other"
+
+
+def classify(y: np.ndarray, sr: int, duration: float, silence_db: float, tagger) -> tuple[list[str], np.ndarray, list[float]]:
+    """Label each 5 s slot as music / speech / other / quiet. Returns (labels, window probabilities, window starts)."""
     starts = window_starts(duration)
     chunks = [y[int(s * sr): int((s + WIN) * sr)] for s in starts]
     loud = [float(np.max(af.loudness_envelope(c, sr, 0.5))) if len(c) else -90.0 for c in chunks]
-    embs = clap.embed_audio(chunks)
-    probs = labels.audio_class_probs(embs, clap)
+    probs = tagger.probs(chunks)
+    cls = tagger.classes(probs)
     n_slots = max(1, int(np.ceil(duration / HOP)))
-    acc = {k: np.zeros(n_slots) for k in ("music", "speech", "other")}
+    m_sum = np.zeros(n_slots)
     cnt = np.zeros(n_slots)
+    sp_max = np.zeros(n_slots)
+    sg_max = np.zeros(n_slots)
     slot_loud = np.full(n_slots, -90.0)
     for wi, s in enumerate(starts):
         a = int(round(s / HOP))
         b = min(n_slots, int(np.ceil((s + WIN) / HOP - 1e-6)))
-        for k in acc:
-            acc[k][a:b] += probs[k][wi]
+        m_sum[a:b] += cls["music"][wi]
         cnt[a:b] += 1
+        sp_max[a:b] = np.maximum(sp_max[a:b], cls["speech"][wi])
+        sg_max[a:b] = np.maximum(sg_max[a:b], cls["singing"][wi])
         slot_loud[a:b] = np.maximum(slot_loud[a:b], loud[wi])
     cnt = np.maximum(cnt, 1)
+    speech_t = float(get_settings().get("scan.speech_threshold", 0.5))
     out = []
     for i in range(n_slots):
-        m, sp, ot = acc["music"][i] / cnt[i], acc["speech"][i] / cnt[i], acc["other"][i] / cnt[i]
         if slot_loud[i] < silence_db + 6:
             out.append("quiet")
-        elif m >= 0.45 and m > sp and m > ot:
-            out.append("music")
-        elif sp >= ot:
-            out.append("speech")
         else:
-            out.append("other")
-    return out, embs, starts
+            out.append(slot_label(m_sum[i] / cnt[i], sp_max[i], sg_max[i], speech_t))
+    return out, probs, starts
 
 
 def find_sections(slot_labels: list[str], duration: float, min_len: float, full_ratio: float) -> tuple[str, list[Section]]:
@@ -221,18 +229,17 @@ def describe_file(path: Path) -> dict:
             "bitrate": br, "duration": pr.duration}
 
 
-def song_features(path: Path, emb: np.ndarray | None, clap) -> dict:
+def song_features(path: Path, probs: np.ndarray | None, tagger) -> dict:
     y = ff.decode_audio(path, af.SR)
     bpm, _beats = af.tempo_and_beats(y)
     energy = af.energy_score(y)
     out = {"bpm": bpm, "energy": energy, "pace": af.song_pace(bpm, energy)}
-    if emb is not None:
-        out["clap_emb"] = emb
-        out["mood"] = json.dumps(labels.song_mood(emb, clap))
+    if probs is not None and len(probs):
+        out["mood"] = json.dumps(tagger.mood(probs))
     return out
 
 
-def add_or_merge(video: str, sec: Section, file: Path, sec_embs: np.ndarray, clap, res: VideoResult,
+def add_or_merge(video: str, sec: Section, file: Path, sec_probs: np.ndarray, tagger, res: VideoResult,
                  ctx: JobContext) -> None:
     db = get_db()
     info = describe_file(file)
@@ -248,8 +255,7 @@ def add_or_merge(video: str, sec: Section, file: Path, sec_embs: np.ndarray, cla
             db.add_source(sid, video, sec.start, sec.end)
             if better:
                 old_path = Path(old["file_path"])
-                emb = sec_embs.mean(axis=0) if len(sec_embs) else None
-                feats = song_features(file, emb / max(np.linalg.norm(emb), 1e-8) if emb is not None else None, clap)
+                feats = song_features(file, sec_probs, tagger)
                 db.update_song(sid, file_path=str(file), partial=int(sec.partial and bool(old["partial"])),
                                fingerprint=fp, **info, **feats)
                 idx.add(sid, fp)
@@ -262,10 +268,7 @@ def add_or_merge(video: str, sec: Section, file: Path, sec_embs: np.ndarray, cla
             res.merged.append(sid)
             ctx.event("song_changed", sid)
             return
-    emb = sec_embs.mean(axis=0) if len(sec_embs) else None
-    if emb is not None:
-        emb = emb / max(np.linalg.norm(emb), 1e-8)
-    feats = song_features(file, emb, clap)
+    feats = song_features(file, sec_probs, tagger)
     sid = db.add_song(file_path=str(file), partial=int(sec.partial), fingerprint=fp, id_status="pending",
                       **info, **feats)
     db.add_source(sid, video, sec.start, sec.end)
@@ -291,15 +294,15 @@ def scan_video(path: Path, ctx: JobContext) -> VideoResult:
             res.status = "no_audio"
         else:
             dur = min(pr.duration or 0, MAX_DECODE_S)
-            y = ff.decode_audio(path, 48000, duration=dur, stream=a.index)
-            dur = len(y) / 48000
+            y = ff.decode_audio(path, TAG_SR, duration=dur, stream=a.index)
+            dur = len(y) / TAG_SR
             silence_db = float(s.get("scan.silence_db", -50))
-            if dur < 1.0 or float(np.max(af.loudness_envelope(y, 48000, 0.5))) < silence_db:
+            if dur < 1.0 or float(np.max(af.loudness_envelope(y, TAG_SR, 0.5))) < silence_db:
                 res.status = "silent"
             else:
-                clap = get_clap()
+                tagger = get_tagger()
                 ctx.check()
-                slot_labels, embs, starts = classify(y, 48000, dur, silence_db, clap)
+                slot_labels, probs, starts = classify(y, TAG_SR, dur, silence_db, tagger)
                 status, secs = find_sections(slot_labels, dur, float(s.get("scan.min_section_s", 12)),
                                              float(s.get("scan.full_ratio", 0.9)))
                 res.status = status
@@ -312,7 +315,7 @@ def scan_video(path: Path, ctx: JobContext) -> VideoResult:
                     if not w_idx:
                         w_idx = [i for i, st0 in enumerate(starts) if st0 < sec.end and st0 + WIN > sec.start]
                     f = extract(vp, a, sec, full, songs_dir)
-                    add_or_merge(vp, sec, f, embs[w_idx] if w_idx else embs[:0], clap, res, ctx)
+                    add_or_merge(vp, sec, f, probs[w_idx] if w_idx else probs[:0], tagger, res, ctx)
                 res.detail = ", ".join(f"{ff.fmt_time(x.start)}-{ff.fmt_time(x.end)}" for x in secs)
     except InterruptedError:
         raise

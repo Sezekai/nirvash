@@ -38,6 +38,7 @@ DEFAULTS: dict[str, Any] = {
         "min_section_s": 12.0,      # shortest music stretch kept from a partial video
         "full_ratio": 0.9,          # share of a video that must be music to count as "all music"
         "silence_db": -50.0,
+        "speech_threshold": 0.5,    # how sure the tagger must be that someone is talking
     },
     "identify": {
         "shazam": True,

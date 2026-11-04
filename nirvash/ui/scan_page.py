@@ -57,8 +57,8 @@ class ScanPage(QWidget):
         bl.setContentsMargins(14, 10, 14, 10)
         self.banner_txt = label("", wrap=True)
         bl.addWidget(self.banner_txt, 1)
-        self.banner_btn = button("Download CLAP (~620 MB)", "download")
-        self.banner_btn.clicked.connect(self._download_clap)
+        self.banner_btn = button(f"Download ({models.AST.approx_mb} MB)", "download")
+        self.banner_btn.clicked.connect(self._download_model)
         bl.addWidget(self.banner_btn)
         root.addWidget(self.banner)
 
@@ -172,15 +172,15 @@ class ScanPage(QWidget):
         self.s.set("ui.last_scan_folders", self._folders())
 
     def refresh_banner(self) -> None:
-        st = models.status(models.CLAP)
+        st = models.status(models.AST)
         self.banner.setVisible(not st["present"])
-        self.banner_txt.setText("Finding music needs the CLAP audio model. It's a one-time download to "
-                                f"{models.own_dir(models.CLAP)}.")
+        self.banner_txt.setText("Finding music needs the audio tagger model. It's a one-time download to "
+                                f"{models.own_dir(models.AST)}.")
 
-    def _download_clap(self) -> None:
+    def _download_model(self) -> None:
         w = self.window()
         if hasattr(w, "settings_page"):
-            w.settings_page.download(models.CLAP)
+            w.settings_page.download(models.AST)
             w.go("settings")
 
     # ---- run --------------------------------------------------------------------
@@ -189,8 +189,8 @@ class ScanPage(QWidget):
         if not folders:
             hub.toast.emit("Add a folder of videos first.", "warn")
             return
-        if not models.status(models.CLAP)["present"]:
-            hub.toast.emit("Download the CLAP model first (Settings > AI models).", "warn")
+        if not models.status(models.AST)["present"]:
+            hub.toast.emit("Download the audio model first (Settings > AI models).", "warn")
             return
         self.table.setRowCount(0)
         self.counts = {"videos": 0, "added": 0, "merged": 0, "partial": 0}

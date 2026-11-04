@@ -93,7 +93,7 @@ class SettingsPage(QScrollArea):
     def _models_card(self) -> QFrame:
         c, l = self._section("AI models", "Run on your PC. Graphics card used when available.")
         self.model_rows: dict[str, dict] = {}
-        for spec in (models.CLAP, models.CLIP):
+        for spec in (models.AST, models.CLIP):
             st = models.status(spec)
             box = QVBoxLayout()
             top = QHBoxLayout()
@@ -304,6 +304,16 @@ class SettingsPage(QScrollArea):
         g.addWidget(pct, 1, 1)
         g.addWidget(label("Treat as silent below"), 2, 0)
         g.addWidget(self._spin("scan.silence_db", -80, -20, 1, " dB", 0), 2, 1)
+        g.addWidget(label("Talking detection sensitivity"), 4, 0)
+        sens = QDoubleSpinBox()
+        sens.setRange(10, 90)
+        sens.setDecimals(0)
+        sens.setSuffix(" %")
+        sens.setToolTip("Lower = stricter: less talking is needed to leave a stretch out")
+        sens.setValue(float(self.s.get("scan.speech_threshold", 0.5)) * 100)
+        sens.setFixedWidth(100)
+        sens.valueChanged.connect(lambda v: self.s.set("scan.speech_threshold", v / 100))
+        g.addWidget(sens, 4, 1)
         g.addWidget(label("Exported file name ends with"), 3, 0)
         suf = QLineEdit(self.s.get("export.suffix", "_edited"))
         suf.setFixedWidth(140)
@@ -357,7 +367,7 @@ class SettingsPage(QScrollArea):
         if self._ask(f"Delete the models Nirvash downloaded in {self.s.folder('models')}?\n\n"
                      f"Collection Sorter's CLIP ({collection_sorter_clip_dir()}) is never touched."):
             encoders.reset()
-            for spec in (models.CLAP, models.CLIP):
+            for spec in (models.AST, models.CLIP):
                 shutil.rmtree(models.own_dir(spec), ignore_errors=True)
             hub.modelsChanged.emit()
             self.build()

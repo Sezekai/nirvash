@@ -188,7 +188,7 @@ class MainWindow(QMainWindow):
                             (f"Identifying songs: {pending} waiting" if pending else ""))
 
     def _check_models(self) -> None:
-        missing = [sp for sp in (models.CLAP, models.CLIP) if not models.status(sp)["present"]]
+        missing = [sp for sp in (models.AST, models.CLIP) if not models.status(sp)["present"]]
         if not missing:
             return
         lines = []
