@@ -80,7 +80,7 @@ items[3].status = "exported"
 items[3].output = str(vids / "dance practice_edited.mp4")
 am.save_session(str(vids), items)
 
-from PySide6.QtCore import QTimer  # noqa: E402
+from PySide6.QtCore import Qt, QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from nirvash.ui import theme  # noqa: E402
@@ -118,13 +118,20 @@ def shoot():
         wait(2.5)
         print("player:", w.auto_page.player.backend, "pos", round(w.auto_page.player.position(), 2),
               "dur", w.auto_page.player.duration(), "playing", w.auto_page.player.is_playing())
-        app.primaryScreen().grabWindow(0).save(str(OUT / "auto_screen.png"))
+        app.primaryScreen().grabWindow(0).scaledToWidth(1100, Qt.SmoothTransformation).save(
+            str(OUT / "auto_screen.jpg"), "JPG", 70)
         w.library.select_song(1)
         w.go("library")
         w.library.play(1)
         wait(2.0)
         print("library player pos", round(w.library.player.position(), 2), "playing", w.library.player.is_playing())
-        app.primaryScreen().grabWindow(0).save(str(OUT / "library_screen.png"))
+        app.primaryScreen().grabWindow(0).scaledToWidth(1100, Qt.SmoothTransformation).save(
+            str(OUT / "library_screen.jpg"), "JPG", 70)
+        import base64
+        for n in ("auto_screen.jpg", "library_screen.jpg"):
+            print(f"B64START {n}")
+            print(base64.b64encode((OUT / n).read_bytes()).decode())
+            print(f"B64END {n}")
     w.library.select_song(1)
     app.processEvents()
     for key in ("library", "scan", "auto", "settings"):

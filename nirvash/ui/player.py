@@ -60,7 +60,8 @@ class Player(QWidget):
         self._b = _Bridge()
         self._b.pos.connect(self._on_pos)
         self._b.dur.connect(self._on_dur)
-        self._b.pause.connect(lambda p: self.playingChanged.emit(not p))
+        self._b.pause.connect(self._on_pause)
+        self._paused = True
         self._b.eof.connect(self.ended.emit)
         self._b.loaded.connect(self._on_loaded)
         self._pos = 0.0
@@ -233,10 +234,7 @@ class Player(QWidget):
 
     def is_playing(self) -> bool:
         if self._mpv is not None:
-            try:
-                return not self._mpv["pause"] and not self._mpv["idle-active"]
-            except Exception:
-                return False
+            return not self._paused
         if self._qt is None:
             return False
         from PySide6.QtMultimedia import QMediaPlayer
@@ -273,6 +271,10 @@ class Player(QWidget):
     def _on_pos(self, v: float) -> None:
         self._pos = v
         self.positionChanged.emit(v)
+
+    def _on_pause(self, paused: bool) -> None:
+        self._paused = paused
+        self.playingChanged.emit(not paused)
 
     def _on_dur(self, v: float) -> None:
         self._dur = v
