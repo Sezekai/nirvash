@@ -41,6 +41,16 @@ class Clap:
         self.t_out = pick_output(self.text, "text_embeds")
         self._text_cache: dict[str, np.ndarray] = {}
         self.batch = 8
+        try:
+            self.embed_audio([np.zeros(48000, np.float32)] * 2)
+            self.embed_text(["music"])
+        except Exception as e:
+            # Some graphics drivers can't run every layer; the processor always can.
+            log.warning("CLAP failed on %s (%s); using the processor", self.provider, e)
+            self.audio, self.provider = make_session(d / "audio_model.onnx", "cpu")
+            self.text, _ = make_session(d / "text_model.onnx", "cpu")
+            self._text_cache.clear()
+            self.batch = 8
         log.info("CLAP ready on %s", self.provider)
 
     def embed_audio(self, chunks: list[np.ndarray]) -> np.ndarray:
@@ -100,6 +110,14 @@ class Clip:
         self.t_in = [i.name for i in self.text.get_inputs()]
         self.t_out = pick_output(self.text, "text_embeds")
         self._text_cache: dict[str, np.ndarray] = {}
+        try:
+            self.embed_images([np.zeros((self.SIZE, self.SIZE, 3), np.uint8)])
+            self.embed_text(["a photo"])
+        except Exception as e:
+            log.warning("CLIP failed on %s (%s); using the processor", self.provider, e)
+            self.vision, self.provider = make_session(d / "vision_model.onnx", "cpu")
+            self.text, _ = make_session(d / "text_model.onnx", "cpu")
+            self._text_cache.clear()
         log.info("CLIP ready on %s (from %s)", self.provider, d)
 
     def embed_images(self, rgb: list[np.ndarray]) -> np.ndarray:
