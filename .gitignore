@@ -1,0 +1,11 @@
+bin/
+__pycache__/
+*.pyc
+_dev_root/
+build/out/
+dist/
+.venv/
+build/tmp/
+build/work/
+out/
+selftest.json

@@ -1,0 +1,10 @@
+PySide6-Essentials==6.8.3
+numpy>=1.26,<3
+onnxruntime-directml==1.24.4; sys_platform == "win32"
+onnxruntime>=1.20; sys_platform != "win32"
+tokenizers>=0.20
+regex>=2024.0
+requests>=2.31
+shazamio==0.9.0
+python-mpv==1.0.8
+Send2Trash>=1.8
