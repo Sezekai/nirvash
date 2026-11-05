@@ -130,10 +130,16 @@ class Player(QWidget):
 
     # ---- Qt fallback -------------------------------------------------------
     def _init_qt(self) -> None:
-        if os.environ.get("NIRVASH_NO_PLAYBACK"):
-            self._qt = None  # headless tests: no media at all
+        from PySide6.QtGui import QGuiApplication
+        if os.environ.get("NIRVASH_NO_PLAYBACK") or QGuiApplication.platformName() == "offscreen":
+            self._qt = None  # no screen (tests): no media at all
             return
-        from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+        try:
+            from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+        except ImportError as e:
+            log.error("no playback available: mpv failed and Qt Multimedia isn't included (%s)", e)
+            self._qt = None
+            return
 
         lay = QStackedLayout(self)
         self._qt = QMediaPlayer(self)
