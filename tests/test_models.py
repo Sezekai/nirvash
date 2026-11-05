@@ -26,7 +26,7 @@ def env(tmp_path_factory):
     from nirvash.analysis import models
     for spec in (models.AST, models.CLIP):
         if models.model_dir(spec) is None:
-            models.download(spec)
+            models.download(spec, lambda f, m: None)
     yield
 
 

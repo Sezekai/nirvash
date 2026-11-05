@@ -79,7 +79,7 @@ def status(spec: ModelSpec) -> dict:
     return {"present": d is not None, "dir": str(d) if d else "", "shared": shared}
 
 
-def download(spec: ModelSpec, on_progress: Callable[[str, float], None] | None = None,
+def download(spec: ModelSpec, on_progress: Callable[[float, str], None] | None = None,
              cancel: threading.Event | None = None) -> Path:
     """Download any missing files of `spec` into Nirvash's own Models folder (resumable)."""
     dest_dir = ensure(own_dir(spec))
@@ -114,16 +114,16 @@ def download(spec: ModelSpec, on_progress: Callable[[str, float], None] | None =
                             if on_progress and time.time() - last > 0.2:
                                 last = time.time()
                                 frac = (i + (got / total if total else 0)) / max(1, len(files))
-                                on_progress(f"{spec.label}: {f.local} ({got / 1e6:.0f}/{total / 1e6:.0f} MB)", frac)
+                                on_progress(frac, f"{spec.label}: {f.local} ({got / 1e6:.0f}/{total / 1e6:.0f} MB)")
                 part.replace(dest)
                 break
             except InterruptedError:
                 raise
             except Exception as e:
-                log.warning("download %s attempt %d failed: %s", f.remote, attempt, e)
+                log.warning("download %s attempt %d failed: %s", f.remote, attempt, e, exc_info=attempt == 1)
                 if attempt == 5:
                     raise
                 time.sleep(2 * attempt)
     if on_progress:
-        on_progress(f"{spec.label}: done", 1.0)
+        on_progress(1.0, f"{spec.label}: done")
     return dest_dir
