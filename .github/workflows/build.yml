@@ -66,13 +66,6 @@ jobs:
           python -u -X faulthandler tests/screenshots.py "$PWD\shots" 2>&1 | Out-String -Stream
           "exit code: $LASTEXITCODE"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: screenshots-${{ github.run_number }}
-          path: shots
-          if-no-files-found: ignore
-          retention-days: 7
-
       - name: Build app
         run: pyinstaller --noconfirm --clean --distpath dist --workpath build/work build/nirvash.spec
 
@@ -84,23 +77,39 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "self-test failed ($($p.ExitCode))" }
 
       - name: Package
+        id: pkg
         shell: pwsh
         run: |
+          $ver = (Select-String -Path nirvash/__init__.py -Pattern 'VERSION = "(.+)"').Matches[0].Groups[1].Value
+          "version=$ver" >> $env:GITHUB_OUTPUT
           New-Item -ItemType Directory -Force out/Nirvash | Out-Null
           Copy-Item -Recurse dist/App out/Nirvash/App
           Copy-Item README.md out/Nirvash/README.txt
-          Compress-Archive -Path out/Nirvash -DestinationPath "Nirvash-${{ github.ref_name }}.zip" -CompressionLevel Optimal
-          Get-Item "Nirvash-*.zip" | Select-Object Name, Length
+          Compress-Archive -Path out/Nirvash -DestinationPath "Nirvash.zip" -CompressionLevel Optimal
+          Get-Item "Nirvash.zip" | Select-Object Name, Length
 
-      - uses: actions/upload-artifact@v4
+      # Builds go to a GitHub release (no storage quota), not to Actions artifacts.
+      - name: Point the "latest" tag at this build
+        if: github.event_name != 'release'
+        run: |
+          git tag -f latest
+          git push -f origin latest
+
+      - name: Publish latest build
+        if: github.event_name != 'release'
+        uses: softprops/action-gh-release@v2
         with:
-          name: Nirvash-${{ github.ref_name }}-${{ github.run_number }}
-          path: out/Nirvash
-          retention-days: 30
+          tag_name: latest
+          name: Nirvash ${{ steps.pkg.outputs.version }} (build ${{ github.run_number }})
+          body: |
+            Latest build of `main` (${{ github.sha }}).
+            Extract `Nirvash.zip` into `E:\Pictures` so the program sits at `E:\Pictures\Nirvash\App\Nirvash.exe`.
+          files: Nirvash.zip
+          make_latest: true
 
-      - name: Release
+      - name: Attach to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
-          files: Nirvash-${{ github.ref_name }}.zip
+          files: Nirvash.zip

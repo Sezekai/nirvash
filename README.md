@@ -12,7 +12,7 @@ A simple, lossless-first video tool.
 
 ## Install
 
-1. Download the latest build (GitHub → Actions → newest run → *Artifacts*, or a Release zip).
+1. Download `Nirvash.zip` from the repo's **Releases** (the *latest* release is always the newest build).
 2. Extract so the program sits at `E:\Pictures\Nirvash\App\Nirvash.exe`.
 3. Run `Nirvash.exe`. On first start it offers to download the audio tagger model (~350 MB) into `E:\Pictures\Nirvash\Models`.
    CLIP is read from Collection Sorter's copy (`%LOCALAPPDATA%\Collection Sorter\models\clip`); if that's ever gone, Nirvash offers to download its own.
