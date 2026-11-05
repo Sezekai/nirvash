@@ -15,7 +15,7 @@ from ..media.ff import fmt_time
 from . import workers
 from .hub import hub
 from .theme import C, icon
-from .widgets import Toggle, button, card, label, open_in_explorer, tool
+from .widgets import TaskProgress, Toggle, button, card, label, open_in_explorer, tool
 
 RESULT_COLOURS = {"music": C["teal"], "partial": C["pink"], "speech": C["muted"], "silent": C["faint"],
                   "no_audio": C["faint"], "skipped": C["faint"], "error": C["red"]}
@@ -110,11 +110,10 @@ class ScanPage(QWidget):
             stats.addWidget(w)
         rl.addLayout(stats)
         rl.addStretch(1)
-        self.prog = QProgressBar()
-        self.prog.setRange(0, 1000)
-        rl.addWidget(self.prog)
-        self.prog_lbl = label("Ready", "muted")
-        rl.addWidget(self.prog_lbl)
+        self.task = TaskProgress()
+        self.task.detail.setText("Ready")
+        self.task.times.setText("")
+        rl.addWidget(self.task)
         btns = QHBoxLayout()
         self.go = button("Find music", "sparkle", "primary")
         self.go.setMinimumHeight(36)
@@ -126,6 +125,7 @@ class ScanPage(QWidget):
         btns.addWidget(self.cancel_btn)
         rl.addLayout(btns)
         self.id_lbl = label("", "muted", wrap=True)
+        self.id_lbl.setVisible(False)
         rl.addWidget(self.id_lbl)
         top.addWidget(rc, 2)
         root.addLayout(top)
@@ -203,7 +203,7 @@ class ScanPage(QWidget):
         self.job.sig.cancelled.connect(lambda: self._finish("Stopped"))
         self.go.setEnabled(False)
         self.cancel_btn.setEnabled(True)
-        self.prog.setValue(0)
+        self.task.start("Listing the videos…")
         workers.start(self.job)
         w = self.window()
         if hasattr(w, "identify"):
@@ -212,22 +212,23 @@ class ScanPage(QWidget):
     def cancel(self) -> None:
         if self.job:
             self.job.cancel()
-            self.prog_lbl.setText("Stopping after the current video…")
+            self.task.detail.setText("Stopping after the current video…")
 
     def _finish(self, msg: str, error: bool = False) -> None:
         self.go.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         c = self.counts
-        self.prog_lbl.setText(f"{msg} — {c['videos']} videos checked, {c['added']} songs added, "
-                              f"{c['merged']} duplicates merged.")
+        self.task.finish(f"{msg} — {c['videos']} videos checked, {c['added']} songs added, "
+                         f"{c['merged']} duplicates merged.")
         hub.toast.emit(msg if error else f"Found {c['added']} new song{'s' if c['added'] != 1 else ''}.",
                        "error" if error else "ok")
         self.job = None
 
     def _progress(self, f: float, msg: str) -> None:
-        self.prog.setValue(int(f * 1000))
         if msg and msg != "Done":
-            self.prog_lbl.setText(f"{self.counts['videos']} / {getattr(self, 'total', '?')} · {msg}")
+            self.task.update(f, f"Video {self.counts['videos'] + 1} of {getattr(self, 'total', '?')} · {msg}")
+        else:
+            self.task.update(f)
 
     def _event(self, kind: str, payload) -> None:
         if kind == "total":
@@ -285,11 +286,11 @@ class ScanPage(QWidget):
         if it:
             open_in_explorer(it.data(256))
 
-    def _id_status(self, pending: int, current: str) -> None:
-        if pending:
-            self.id_lbl.setText(f"Identifying songs in the background: {pending} waiting. "
+    def _id_status(self, st: dict) -> None:
+        on = bool(st.get("pending"))
+        self.id_lbl.setVisible(on)
+        if on:
+            self.id_lbl.setText("Songs are identified in the background (progress at the bottom of the window). "
                                 "Shazam allows about 20 lookups a minute.")
-        else:
-            self.id_lbl.setText("")
 
     counts = {"videos": 0, "added": 0, "merged": 0, "partial": 0}

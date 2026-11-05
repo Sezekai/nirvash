@@ -84,11 +84,13 @@ def open_in_explorer(path: str) -> None:
     p = Path(path)
     if sys.platform == "win32":
         if p.is_file():
-            subprocess.Popen(["explorer", "/select,", str(p)])
+            from ..media.ff import popen
+            popen(["explorer", "/select,", str(p)], creationflags=0)
         else:
             os.startfile(str(p if p.exists() else p.parent))  # type: ignore[attr-defined]
     else:
-        subprocess.Popen(["xdg-open", str(p if p.is_dir() else p.parent)])
+        from ..media.ff import popen
+        popen(["xdg-open", str(p if p.is_dir() else p.parent)])
 
 
 def cover_pixmap(path: str | None, size: int, seed: str = "", radius: int = 12) -> QPixmap:
@@ -223,3 +225,99 @@ class Toggle(QPushButton):
         p.setBrush(QColor("#0b0c14") if on else QColor(C["muted"]))
         p.drawEllipse(21 if on else 3, 3, 16, 16)
         p.end()
+
+
+def fmt_dur(s: float) -> str:
+    s = int(max(0, round(s)))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{sec:02d}"
+    return f"{m}:{sec:02d}"
+
+
+class TaskProgress(QWidget):
+    """Progress bar + percentage + time elapsed + time left + what it's doing right now.
+
+    The elapsed time ticks every second, so it's always visible that the task is still running."""
+
+    def __init__(self, parent=None, compact: bool = False):
+        super().__init__(parent)
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QProgressBar
+
+        self.compact = compact
+        lay = QHBoxLayout(self) if compact else QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8 if compact else 4)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        if compact:
+            self.bar.setFixedWidth(160)
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        self.pct = label("0%")
+        self.pct.setStyleSheet(f"font-weight:700; color:{C['teal']};")
+        self.times = label("", "muted")
+        self.detail = label("", "muted")
+        self.detail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        if compact:
+            for w in (self.bar, self.pct, self.times):
+                lay.addWidget(w)
+            lay.addWidget(self.detail, 1)
+        else:
+            top.addWidget(self.pct)
+            top.addWidget(self.times, 1)
+            lay.addWidget(self.bar)
+            lay.addLayout(top)
+            lay.addWidget(self.detail)
+        self.t0 = 0.0
+        self.frac = 0.0
+        self.running = False
+        self.timer = QTimer(self, interval=1000, timeout=self._tick)
+
+    def start(self, detail: str = "", t0: float | None = None) -> None:
+        import time
+        self.t0 = t0 or time.time()
+        self.frac = 0.0
+        self.running = True
+        self.bar.setValue(0)
+        self.detail.setText(detail)
+        self.setVisible(True)
+        self.timer.start()
+        self._tick()
+
+    def update(self, frac: float, detail: str | None = None) -> None:
+        if not self.running:
+            self.start()
+        self.frac = max(0.0, min(1.0, float(frac)))
+        self.bar.setValue(int(self.frac * 1000))
+        if detail is not None:
+            self.detail.setText(detail)
+            self.detail.setToolTip(detail)
+        self._tick()
+
+    def _tick(self) -> None:
+        import time
+        if not self.running:
+            return
+        el = time.time() - self.t0
+        self.pct.setText(f"{self.frac * 100:.0f}%")
+        if self.frac >= 0.01 and el >= 3:
+            left = el * (1 - self.frac) / self.frac
+            eta = f"about {fmt_dur(left)} left"
+        else:
+            eta = "working out time left…"
+        self.times.setText(f"{fmt_dur(el)} elapsed · {eta}")
+
+    def finish(self, text: str = "") -> None:
+        import time
+        if self.running:
+            el = time.time() - self.t0
+            self.bar.setValue(int(self.frac * 1000))
+            self.times.setText(f"took {fmt_dur(el)}")
+        self.running = False
+        self.timer.stop()
+        if text:
+            self.detail.setText(text)
+            self.detail.setToolTip(text)

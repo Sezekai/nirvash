@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -39,8 +40,39 @@ def ffprobe() -> str:
     return bin_path("ffprobe")
 
 
+# Starting processes from several threads while anything changes the process environment can crash Windows'
+# CreateProcess (it reads the live environment block). So: every child gets its own copy of the environment,
+# made from Python's mapping, and processes are started one at a time.
+ENV_LOCK = threading.RLock()
+
+
+def child_env() -> dict[str, str]:
+    with ENV_LOCK:
+        return dict(os.environ)
+
+
+def set_env(key: str, value: str) -> None:
+    with ENV_LOCK:
+        os.environ[key] = value
+
+
+def popen(args: list[str], **kw) -> subprocess.Popen:
+    kw.setdefault("creationflags", NO_WINDOW)
+    kw.setdefault("env", child_env())
+    with ENV_LOCK:
+        return subprocess.Popen(args, **kw)
+
+
 def run(args: list[str], *, timeout: float | None = None, input: bytes | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(args, capture_output=True, timeout=timeout, input=input, creationflags=NO_WINDOW)
+    proc = popen(args, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        out, err = proc.communicate(input=input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(args, proc.returncode, out, err)
 
 
 @dataclass
@@ -169,7 +201,7 @@ def run_with_progress(args: list[str], total_s: float, on_progress: Callable[[fl
     """Run ffmpeg with -progress, reporting 0..1. Raises FFError / Cancelled."""
     full = [args[0], "-hide_banner", "-nostdin", "-progress", "pipe:1", "-nostats"] + args[1:]
     log.info("ffmpeg %s", " ".join(f'"{a}"' if " " in a else a for a in full[1:]))
-    proc = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=NO_WINDOW)
+    proc = popen(full, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     err_chunks: list[bytes] = []
 
     def _drain():

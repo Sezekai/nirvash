@@ -42,7 +42,7 @@ for i in range(N):
                       title=s(rng) if i % 3 else None, artist=s(rng) if i % 2 else None,
                       genre=rng.choice(["J-Pop", "Rock", "", None, "Música 🎶"]), bpm=rng.choice([None, 128.0]),
                       full_length=rng.choice([None, 200.0]), mood=json.dumps({"calm": .6, "happy": .4}),
-                      id_status=rng.choice(st), partial=i % 4 == 0, favourite=i % 7 == 0,
+                      id_status="pending" if i < 300 else rng.choice(st), partial=i % 4 == 0, favourite=i % 7 == 0,
                       lyrics_plain="歌詞 🎤\nline" if i % 5 == 0 else None)
     db.add_source(sid, f"E:\\vids\\{s(rng)[:80]}.mp4", 0, 10)
 cid = db.add_category("Chill 🌙", "#2fe0c0")
@@ -65,8 +65,7 @@ app.setStyleSheet(theme.fixed_stylesheet())
 from nirvash.ui.main_window import MainWindow  # noqa: E402
 
 MainWindow._check_models = lambda self: None
-w = MainWindow()
-w.identify.pause(True)
+w = MainWindow()   # identification runs (song files don't exist, so each lookup fails fast) like at real startup
 w.show()
 
 

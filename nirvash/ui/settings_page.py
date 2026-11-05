@@ -17,7 +17,7 @@ from ..jobs import scan as scanjob
 from . import workers
 from .hub import hub
 from .theme import C
-from .widgets import Toggle, button, card, chip, clear_layout, hline, label, open_in_explorer
+from .widgets import TaskProgress, Toggle, button, card, chip, clear_layout, hline, label, open_in_explorer
 
 
 class SettingsPage(QScrollArea):
@@ -33,6 +33,7 @@ class SettingsPage(QScrollArea):
         self.root.setContentsMargins(22, 18, 22, 22)
         self.root.setSpacing(14)
         self.dl_jobs: dict[str, workers.Job] = {}
+        self.dl_state: dict[str, dict] = {}
         self.build()
 
     def build(self) -> None:
@@ -100,6 +101,8 @@ class SettingsPage(QScrollArea):
             top.addWidget(label(spec.label))
             if st["present"]:
                 top.addWidget(chip("Ready", C["teal"]))
+            elif spec.key in self.dl_jobs:
+                top.addWidget(chip("Downloading", C["violet"]))
             else:
                 top.addWidget(chip("Not downloaded", C["amber"]))
             top.addStretch(1)
@@ -117,18 +120,15 @@ class SettingsPage(QScrollArea):
             path_l = label(where, "faint", wrap=True)
             path_l.setTextInteractionFlags(Qt.TextSelectableByMouse)
             box.addWidget(path_l)
-            prog = QProgressBar()
-            prog.setRange(0, 1000)
-            prog.setVisible(spec.key in self.dl_jobs)
-            box.addWidget(prog)
-            msg = label("", "muted")
-            msg.setVisible(spec.key in self.dl_jobs)
-            box.addWidget(msg)
+            task = TaskProgress()
+            task.setVisible(spec.key in self.dl_jobs)
+            box.addWidget(task)
             if spec.key in self.dl_jobs:
                 btn.setEnabled(False)
-                job = self.dl_jobs[spec.key]
-                job.sig.progress.connect(lambda f, m, p=prog, ml=msg: (p.setValue(int(f * 1000)), ml.setText(m)))
-            self.model_rows[spec.key] = {"btn": btn, "prog": prog, "msg": msg}
+                stt = self.dl_state.get(spec.key, {})
+                task.start(stt.get("msg", "Starting download…"), t0=stt.get("t0"))
+                task.update(stt.get("frac", 0.0), stt.get("msg"))
+            self.model_rows[spec.key] = {"btn": btn, "task": task}
             l.addLayout(box)
             l.addWidget(hline())
         row = QHBoxLayout()
@@ -148,11 +148,15 @@ class SettingsPage(QScrollArea):
     def download(self, spec: models.ModelSpec) -> None:
         if spec.key in self.dl_jobs:
             return
+        import time
         job = workers.Job(lambda ctx: models.download(spec, ctx.progress, ctx.cancel))
         self.dl_jobs[spec.key] = job
+        self.dl_state[spec.key] = {"t0": time.time(), "frac": 0.0, "msg": "Starting download…"}
+        job.sig.progress.connect(lambda f, m, k=spec.key: self._dl_progress(k, f, m))
 
         def fin(ok: bool, msg: str = ""):
             self.dl_jobs.pop(spec.key, None)
+            self.dl_state.pop(spec.key, None)
             encoders.reset()
             hub.modelsChanged.emit()
             hub.toast.emit(f"{spec.label} downloaded." if ok else f"{spec.label} download failed: {msg}",
@@ -164,6 +168,18 @@ class SettingsPage(QScrollArea):
         job.sig.cancelled.connect(lambda: fin(False, "cancelled"))
         workers.start(job)
         self.build()
+
+    def _dl_progress(self, key: str, frac: float, msg: str) -> None:
+        stt = self.dl_state.get(key)
+        if stt is None:
+            return
+        stt["frac"], stt["msg"] = frac, msg
+        row = self.model_rows.get(key)
+        if row:
+            try:
+                row["task"].update(frac, msg)
+            except RuntimeError:  # the row was rebuilt
+                pass
 
     # ---- folders -------------------------------------------------------------------
     def _folders_card(self) -> QFrame:

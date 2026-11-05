@@ -96,8 +96,8 @@ def test_find_music_auto_music_and_library(app, tmp_path):
     page._folder_item(str(src))
     page.start()
     assert wait_for(app, lambda: page.job is None), "scan didn't finish"
-    assert page.counts["videos"] == 1 and page.counts["added"] == 1, (page.counts, page.prog_lbl.text())
-    assert "Stopped" not in page.prog_lbl.text(), page.prog_lbl.text()
+    assert page.counts["videos"] == 1 and page.counts["added"] == 1, (page.counts, page.task.detail.text())
+    assert "Stopped" not in page.task.detail.text(), page.task.detail.text()
     songs = get_db().songs()
     assert len(songs) == 1 and Path(songs[0]["file_path"]).exists()
     sid = songs[0]["id"]

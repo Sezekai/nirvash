@@ -81,15 +81,28 @@ def status(spec: ModelSpec) -> dict:
 
 def download(spec: ModelSpec, on_progress: Callable[[float, str], None] | None = None,
              cancel: threading.Event | None = None) -> Path:
-    """Download any missing files of `spec` into Nirvash's own Models folder (resumable)."""
+    """Download any missing files of `spec` into Nirvash's own Models folder (resumable).
+
+    Progress is by bytes across all files, with MB done / total and the current speed."""
     dest_dir = ensure(own_dir(spec))
     files = [f for f in spec.files if not (dest_dir / f.local).exists()]
     sess = requests.Session()
     sess.headers["User-Agent"] = "Nirvash"
-    for i, f in enumerate(files):
+    urls = {f.local: f"{HF}/{f.repo}/resolve/main/{f.remote}" for f in files}
+    sizes: dict[str, int] = {}
+    for f in files:
+        try:
+            r = sess.head(urls[f.local], allow_redirects=True, timeout=30)
+            sizes[f.local] = int(r.headers.get("content-length") or 0)
+        except Exception:
+            sizes[f.local] = 0
+    grand = sum(sizes.values())
+    finished = 0
+    speed_t, speed_b, speed = time.time(), 0, 0.0
+    for f in files:
         dest = dest_dir / f.local
         part = dest.with_suffix(dest.suffix + ".part")
-        url = f"{HF}/{f.repo}/resolve/main/{f.remote}"
+        url = urls[f.local]
         for attempt in range(1, 6):
             try:
                 have = part.stat().st_size if part.exists() else 0
@@ -103,6 +116,9 @@ def download(spec: ModelSpec, on_progress: Callable[[float, str], None] | None =
                     if r.status_code == 200:
                         have = 0
                     total = have + int(r.headers.get("content-length") or 0)
+                    if not sizes.get(f.local):
+                        sizes[f.local] = total
+                        grand = sum(sizes.values())
                     with open(part, "ab" if r.status_code == 206 else "wb") as fh:
                         got = have
                         last = 0.0
@@ -111,19 +127,30 @@ def download(spec: ModelSpec, on_progress: Callable[[float, str], None] | None =
                                 raise InterruptedError("cancelled")
                             fh.write(chunk)
                             got += len(chunk)
-                            if on_progress and time.time() - last > 0.2:
-                                last = time.time()
-                                frac = (i + (got / total if total else 0)) / max(1, len(files))
-                                on_progress(frac, f"{spec.label}: {f.local} ({got / 1e6:.0f}/{total / 1e6:.0f} MB)")
+                            speed_b += len(chunk)
+                            now = time.time()
+                            if now - speed_t >= 1.0:
+                                speed = speed_b / (now - speed_t) / 1e6
+                                speed_t, speed_b = now, 0
+                            if on_progress and now - last > 0.25:
+                                last = now
+                                done = finished + got
+                                frac = done / grand if grand else 0.0
+                                on_progress(frac, f"{spec.label}: {done / 1e6:.0f} of {grand / 1e6:.0f} MB"
+                                                  + (f" · {speed:.1f} MB/s" if speed else ""))
                 part.replace(dest)
                 break
             except InterruptedError:
                 raise
             except Exception as e:
                 log.warning("download %s attempt %d failed: %s", f.remote, attempt, e, exc_info=attempt == 1)
+                if on_progress:
+                    on_progress(finished / grand if grand else 0.0,
+                                f"{spec.label}: connection problem, retrying ({attempt}/5)…")
                 if attempt == 5:
                     raise
                 time.sleep(2 * attempt)
+        finished += sizes.get(f.local) or dest.stat().st_size
     if on_progress:
         on_progress(1.0, f"{spec.label}: done")
     return dest_dir

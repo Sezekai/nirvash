@@ -71,7 +71,12 @@ def _run_async(coro):
         if _loop is None:
             _loop = asyncio.new_event_loop()
             threading.Thread(target=_loop.run_forever, daemon=True, name="shazam-loop").start()
-    return asyncio.run_coroutine_threadsafe(coro, _loop).result(timeout=60)
+    fut = asyncio.run_coroutine_threadsafe(coro, _loop)
+    try:
+        return fut.result(timeout=25)
+    except TimeoutError:
+        fut.cancel()
+        raise RuntimeError("Shazam didn't answer within 25 s")
 
 
 def shazam(y: np.ndarray, sr: int, cancel: threading.Event | None = None) -> dict | None:

@@ -22,7 +22,8 @@ def _load_mpv():
         return _mpv_mod
     for d in (bundle_dir() / "bin", app_dir() / "bin"):
         if d.exists():
-            os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
+            from ..media.ff import set_env
+            set_env("PATH", str(d) + os.pathsep + os.environ.get("PATH", ""))
             if sys.platform == "win32":
                 try:
                     os.add_dll_directory(str(d))

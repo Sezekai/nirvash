@@ -17,7 +17,7 @@ from .library_page import LibraryPage
 from .scan_page import ScanPage
 from .settings_page import SettingsPage
 from .theme import C, icon
-from .widgets import label, tool
+from .widgets import TaskProgress, label, tool
 
 
 class EditorPlaceholder(QWidget):
@@ -146,8 +146,15 @@ class MainWindow(QMainWindow):
         strip.setStyleSheet(f"background:{C['rail']}; border-top:1px solid {C['border']};")
         sl = QHBoxLayout(strip)
         sl.setContentsMargins(14, 4, 10, 4)
-        self.id_lbl = label("", "muted")
-        sl.addWidget(self.id_lbl, 1)
+        self.id_title = label("", "muted")
+        sl.addWidget(self.id_title)
+        self.id_task = TaskProgress(compact=True)
+        self.id_task.setVisible(False)
+        sl.addWidget(self.id_task, 1)
+        self.id_pause = tool("pause", "Pause / resume identifying songs", C["muted"], 14, checkable=True)
+        self.id_pause.setVisible(False)
+        self.id_pause.toggled.connect(self._pause_identify)
+        sl.addWidget(self.id_pause)
         self.log_btn = tool("log", "Show / hide the log", C["muted"], 16, checkable=True)
         self.log_btn.setChecked(self.log_view.isVisible())
         self.log_btn.toggled.connect(self._toggle_log)
@@ -162,7 +169,7 @@ class MainWindow(QMainWindow):
         hub.identifyStatus.connect(self._id_status)
 
         self.identify = IdentifyQueue(on_change=lambda sid: hub.songChanged.emit(sid),
-                                      on_status=lambda n, cur: hub.identifyStatus.emit(n, cur))
+                                      on_status=lambda st: hub.identifyStatus.emit(st))
         self.go("library")
         QTimer.singleShot(600, self._check_models)
 
@@ -183,9 +190,28 @@ class MainWindow(QMainWindow):
     def _log_line(self, level: str, msg: str) -> None:
         self.log_view.appendPlainText(msg)
 
-    def _id_status(self, pending: int, current: str) -> None:
-        self.id_lbl.setText(f"Identifying songs: {pending} waiting · {current}" if pending and current else
-                            (f"Identifying songs: {pending} waiting" if pending else ""))
+    def _id_status(self, st: dict) -> None:
+        pending, done = int(st.get("pending") or 0), int(st.get("done") or 0)
+        paused = self.id_pause.isChecked()
+        if not pending and not st.get("busy"):
+            self.id_title.setText("")
+            self.id_task.finish()
+            self.id_task.setVisible(False)
+            self.id_pause.setVisible(paused)
+            return
+        total = done + pending
+        self.id_title.setText(f"Identifying songs: {done} of {total}" + (" (paused)" if paused else ""))
+        self.id_task.setVisible(True)
+        self.id_pause.setVisible(True)
+        if st.get("started") and (not self.id_task.running or abs(self.id_task.t0 - st["started"]) > 0.5):
+            self.id_task.start(t0=st["started"])
+        self.id_task.update(done / total if total else 0.0, st.get("current") or "")
+
+    def _pause_identify(self, on: bool) -> None:
+        self.identify.pause(on)
+        self.id_pause.setIcon(icon("play" if on else "pause", C["amber"] if on else C["muted"], 14))
+        txt = self.id_title.text().replace(" (paused)", "")
+        self.id_title.setText(txt + (" (paused)" if on else ""))
 
     def _check_models(self) -> None:
         missing = [sp for sp in (models.AST, models.CLIP) if not models.status(sp)["present"]]

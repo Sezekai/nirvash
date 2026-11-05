@@ -19,7 +19,7 @@ from .hub import hub
 from .player import Player
 from .song_picker import SongPicker
 from .theme import C, icon
-from .widgets import (PlayerBar, Toggle, button, card, chip, clear_layout, cover_pixmap, label, open_in_explorer, tool)
+from .widgets import (PlayerBar, TaskProgress, Toggle, button, card, chip, clear_layout, cover_pixmap, label, open_in_explorer, tool)
 
 STATUS_TXT = {"new": ("Not matched", C["faint"]), "matched": ("Matched", C["violet"]), "no_match": ("No song fits", C["amber"]),
               "exported": ("Exported", C["teal"]), "error": ("Error", C["red"])}
@@ -52,7 +52,7 @@ def find_songs_job(ctx, folder: str, recursive: bool, existing: list[am.AutoItem
 def export_job(ctx, items: list[am.AutoItem]) -> list[am.AutoItem]:
     for n, it in enumerate(items):
         ctx.check()
-        sub = am.JobContext(lambda f, m, n=n: ctx.progress((n + f) / len(items), m))
+        sub = am.JobContext(lambda f, m, n=n: ctx.progress((n + f) / len(items), f"video {n + 1} of {len(items)} · {m}"))
         sub.cancel = ctx.cancel
         try:
             am.export_item(it, sub)
@@ -104,11 +104,6 @@ class AutoMusicPage(QWidget):
         self.rule.activated.connect(self._rule_changed)
         opts.addWidget(self.rule)
         opts.addStretch(1)
-        self.prog = QProgressBar()
-        self.prog.setRange(0, 1000)
-        self.prog.setFixedWidth(200)
-        self.prog.setVisible(False)
-        opts.addWidget(self.prog)
         self.status = label("", "muted")
         opts.addWidget(self.status)
         self.stop_btn = button("Stop", "x")
@@ -116,6 +111,9 @@ class AutoMusicPage(QWidget):
         self.stop_btn.clicked.connect(lambda: self.job and self.job.cancel())
         opts.addWidget(self.stop_btn)
         root.addLayout(opts)
+        self.task = TaskProgress(compact=True)
+        self.task.setVisible(False)
+        root.addWidget(self.task)
 
         split = QSplitter(Qt.Horizontal)
         split.setHandleWidth(12)
@@ -304,15 +302,17 @@ class AutoMusicPage(QWidget):
 
     # ---- jobs -------------------------------------------------------------------
     def _busy(self, on: bool, text: str = "") -> None:
-        self.prog.setVisible(on)
+        if on:
+            self.task.start(text)
+        else:
+            self.task.finish()
+            self.task.setVisible(False)
         self.stop_btn.setVisible(on)
         self.find_btn.setEnabled(not on)
         self.exp_all.setEnabled(not on)
         self.exp_ready.setEnabled(not on)
         self.exp_one.setEnabled(not on)
-        self.status.setText(text)
-        if on:
-            self.prog.setValue(0)
+
 
     def find_songs(self) -> None:
         if not self.folder or not Path(self.folder).exists():
@@ -322,7 +322,7 @@ class AutoMusicPage(QWidget):
             return
         self.player.unload()
         self.job = workers.Job(find_songs_job, self.folder, bool(self.s.get("automusic.recursive")), self.items)
-        self.job.sig.progress.connect(lambda f, m: (self.prog.setValue(int(f * 1000)), self.status.setText(m)))
+        self.job.sig.progress.connect(lambda f, m: self.task.update(f, m))
         self.job.sig.event.connect(self._event)
         self.job.sig.done.connect(self._found)
         self.job.sig.failed.connect(lambda e: (hub.toast.emit(e, "error"), self._job_done()))
@@ -364,7 +364,7 @@ class AutoMusicPage(QWidget):
             return
         self.player.pause()
         self.job = workers.Job(export_job, items)
-        self.job.sig.progress.connect(lambda f, m: (self.prog.setValue(int(f * 1000)), self.status.setText(f"Exporting {m}")))
+        self.job.sig.progress.connect(lambda f, m: self.task.update(f, f"Exporting {m}"))
         self.job.sig.event.connect(self._event)
         self.job.sig.done.connect(lambda res: self._exported(res))
         self.job.sig.failed.connect(lambda e: (hub.toast.emit(e, "error"), self._job_done()))

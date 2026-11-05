@@ -7,7 +7,7 @@ from PySide6.QtCore import QObject, Signal
 class Hub(QObject):
     songChanged = Signal(int)        # one song changed (or was added)
     songsReset = Signal()            # reload everything
-    identifyStatus = Signal(int, str)
+    identifyStatus = Signal(dict)       # pending, current, done, started, busy
     categoriesChanged = Signal()
     modelsChanged = Signal()
     logLine = Signal(str, str)
