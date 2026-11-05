@@ -37,7 +37,7 @@ jobs:
         shell: pwsh
         run: |
           $env:PATH = "$PWD\bin;$env:PATH"
-          python -m pytest -q tests/test_pipeline.py tests/test_download.py
+          python -m pytest -q tests/test_pipeline.py tests/test_download.py tests/test_ui_flows.py
 
       - name: Cache AI models
         uses: actions/cache@v4

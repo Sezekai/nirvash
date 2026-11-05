@@ -339,7 +339,7 @@ def scan_video(path: Path, ctx: JobContext) -> VideoResult:
     return res
 
 
-def scan_folders(folders: list[str], ctx: JobContext) -> list[VideoResult]:
+def scan_folders(ctx: JobContext, folders: list[str]) -> list[VideoResult]:
     s = get_settings()
     videos: list[Path] = []
     seen = set()
