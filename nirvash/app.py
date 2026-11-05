@@ -60,6 +60,24 @@ def selftest(out: str) -> int:
     return 1 if any(v.startswith("FAIL") for v in res.values()) else 0
 
 
+def _crash_log() -> None:
+    """Write native crashes (which skip Python's error handling) to logs/crash.log."""
+    import faulthandler
+    import time
+
+    from .core import paths
+
+    try:
+        d = paths.ensure(paths.data_dir() / "logs")
+        fh = open(d / "crash.log", "a", encoding="utf-8")
+        fh.write(f"\n=== started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        fh.flush()
+        faulthandler.enable(file=fh, all_threads=True)
+        globals()["_crash_fh"] = fh
+    except Exception:
+        pass
+
+
 def main() -> int:
     if "--selftest" in sys.argv:
         i = sys.argv.index("--selftest")
@@ -72,6 +90,7 @@ def main() -> int:
     from .ui import theme
 
     log = _log.setup()
+    _crash_log()
     if sys.platform == "win32":
         try:
             import ctypes

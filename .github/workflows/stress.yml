@@ -1,0 +1,29 @@
+name: Stress check (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["tests/stress_library.py", ".github/workflows/stress.yml"]
+
+jobs:
+  stress:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python build/fetch_tools.py
+      - name: Big library with emoji / CJK on a real screen
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\bin;$env:PATH"
+          python -u -X faulthandler tests/stress_library.py 1600 2>&1 | Out-String -Stream
+          "exit code: $LASTEXITCODE"
+          Get-ChildItem $env:TEMP -Recurse -Filter crash.log -ErrorAction SilentlyContinue | ForEach-Object { "--- $($_.FullName)"; Get-Content $_ }
