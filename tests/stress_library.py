@@ -79,6 +79,32 @@ def pump(sec):
 
 pump(1)
 print("window shown", flush=True)
+
+# Background updates like song identification does: DB writes + change signals from another thread.
+import threading  # noqa: E402
+
+from nirvash.ui.hub import hub  # noqa: E402
+
+stop = threading.Event()
+
+
+def churn():
+    r = random.Random(2)
+    n = 0
+    while not stop.is_set():
+        sid = r.randint(1, N)
+        db.update_song(sid, id_status=r.choice(st), title=s(r), genre=r.choice(["Pop 🎵", "J-Rock", None]))
+        hub.songChanged.emit(sid)
+        hub.identifyStatus.emit(r.randint(0, 300), s(r))
+        n += 1
+        if n % 50 == 0:
+            new = db.add_song(file_path=str(songs_dir / f"new {n}.m4a"), duration=30.0, title=s(r), id_status="pending")
+            hub.songChanged.emit(new)
+        time.sleep(0.002)
+
+
+th = threading.Thread(target=churn, daemon=True)
+th.start()
 lib = w.library
 t = lib.table
 sb = t.verticalScrollBar()
@@ -104,6 +130,12 @@ for key in ("scan", "auto", "settings", "library"):
 lib.search.setText("🔥")
 pump(0.3)
 lib.search.setText("")
+for _ in range(3):
+    for row in range(0, lib.proxy.rowCount(), max(1, lib.proxy.rowCount() // 40)):
+        t.selectRow(row)
+        pump(0.05)
+stop.set()
+pump(1)
 print("STRESS OK", flush=True)
 w.identify.stop()
 w.close()
