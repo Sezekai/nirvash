@@ -71,7 +71,9 @@ class Player(QWidget):
         self._mpv = None
         self._qt = None
         self._wid = None
-        self._use_mpv = _load_mpv() is not None
+        from PySide6.QtGui import QGuiApplication
+        headless = bool(os.environ.get("NIRVASH_NO_PLAYBACK")) or QGuiApplication.platformName() == "offscreen"
+        self._use_mpv = not headless and _load_mpv() is not None
         if self.video_enabled and self._use_mpv:
             # mpv draws into this widget's own window; it's created on first use, once the widget sits in its
             # final place (moving a native widget to a new parent replaces its window).
