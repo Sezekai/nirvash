@@ -51,8 +51,8 @@ def song_row(r) -> dict:
 
 
 class LibraryModel(QAbstractTableModel):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self.rows: list[dict] = []
         self.cats: dict[int, set[int]] = {}
         self.cat_info: dict[int, tuple[str, str]] = {}
@@ -136,8 +136,8 @@ class LibraryModel(QAbstractTableModel):
 
 
 class LibraryFilter(QSortFilterProxyModel):
-    def __init__(self, model: LibraryModel):
-        super().__init__()
+    def __init__(self, model: LibraryModel, parent=None):
+        super().__init__(parent)
         self.setSourceModel(model)
         self.m = model
         self.setSortRole(ROLE_SORT)
@@ -169,8 +169,10 @@ class LibraryFilter(QSortFilterProxyModel):
 class ChipDelegate(QStyledItemDelegate):
     """Paints the Categories and Status columns as coloured pills."""
 
-    def __init__(self, model: LibraryModel, kind: str):
-        super().__init__()
+    def __init__(self, model: LibraryModel, kind: str, parent):
+        # Must have a parent (and a Python reference): the view only keeps a raw pointer, so a delegate
+        # Python frees would be painted through a dangling pointer - that crashed Qt6Widgets on Windows.
+        super().__init__(parent)
         self.m, self.kind = model, kind
 
     def paint(self, p: QPainter, opt, idx):
@@ -427,8 +429,8 @@ class LibraryPage(QWidget):
     def __init__(self):
         super().__init__()
         self.setObjectName("page")
-        self.model = LibraryModel()
-        self.proxy = LibraryFilter(self.model)
+        self.model = LibraryModel(self)
+        self.proxy = LibraryFilter(self.model, self)
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 18, 22, 14)
         root.setSpacing(12)
@@ -512,8 +514,10 @@ class LibraryPage(QWidget):
         for col in get_settings().get("ui.hidden_columns", [4]) or []:
             if 1 < col < len(COLS):
                 self.table.setColumnHidden(col, True)
-        self.table.setItemDelegateForColumn(8, ChipDelegate(self.model, "cats"))
-        self.table.setItemDelegateForColumn(9, ChipDelegate(self.model, "status"))
+        self.chip_delegates = [ChipDelegate(self.model, "cats", self.table),
+                               ChipDelegate(self.model, "status", self.table)]
+        self.table.setItemDelegateForColumn(8, self.chip_delegates[0])
+        self.table.setItemDelegateForColumn(9, self.chip_delegates[1])
         self.table.clicked.connect(self._clicked)
         self.table.doubleClicked.connect(lambda idx: self.play(self._sid(idx)))
         self.table.selectionModel().currentRowChanged.connect(lambda cur, _p: self._select(cur))
