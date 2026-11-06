@@ -44,7 +44,10 @@ for i in range(N):
                       full_length=rng.choice([None, 200.0]), mood=json.dumps({"calm": .6, "happy": .4}),
                       id_status="pending" if i < 300 else rng.choice(st), partial=i % 4 == 0, favourite=i % 7 == 0,
                       lyrics_plain="歌詞 🎤\nline" if i % 5 == 0 else None)
-    db.add_source(sid, f"E:\\vids\\{s(rng)[:80]}.mp4", 0, 10)
+    sub = "\\".join(s(rng)[:30].replace("\\", "_").replace("/", "_").strip() or "x" for _ in range(rng.randint(0, 3)))
+    if i % 11:
+        db.add_source(sid, f"E:\\vids\\{sub + chr(92) if sub else ''}{s(rng)[:80]}.mp4", 0, 10)
+    db.update_song(sid, played=i % 3 == 0, listen_count=i % 4, approved=i % 6 == 0, unlinked=i % 11 == 0)
 cid = db.add_category("Chill 🌙", "#2fe0c0")
 for i in range(1, N, 5):
     db.set_song_category(i, cid, True)
@@ -119,10 +122,38 @@ for row in range(0, lib.proxy.rowCount(), max(1, lib.proxy.rowCount() // 60)):
     t.selectRow(row)
     pump(0.02)
 print("selected rows", flush=True)
-for col in range(1, 10):
+from nirvash.ui.library_page import COLS, FILTERS  # noqa: E402
+
+for col in range(len(COLS)):
     t.sortByColumn(col, Qt.AscendingOrder)
     pump(0.05)
 print("sorted", flush=True)
+for k in FILTERS:
+    for st_ in (1, 2, 0):
+        lib.set_filter(k, st_)
+        pump(0.03)
+lib.set_filter("approved", 1)
+lib.set_filter("identified", 2)
+pump(0.2)
+lib.clear_filters()
+tree = lib.folder_tree
+items, stack = [], [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+while stack:
+    it = stack.pop()
+    items.append(it)
+    stack += [it.child(i) for i in range(it.childCount())]
+for it in items[:80]:
+    tree.setCurrentItem(it)
+    it.setExpanded(True)
+    pump(0.02)
+tree.setCurrentItem(tree.topLevelItem(0))
+print("filters and folders", len(items), flush=True)
+for sid in (1, 2, 3):
+    lib.select_song(sid)
+    pump(0.1)
+    lib.toggle_play(sid)
+    pump(0.1)
+print("detail + play buttons", flush=True)
 for key in ("scan", "auto", "settings", "library"):
     w.go(key)
     pump(0.3)

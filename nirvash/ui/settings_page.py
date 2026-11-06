@@ -355,7 +355,38 @@ class SettingsPage(QScrollArea):
             row.addWidget(b)
         row.addStretch(1)
         l.addLayout(row)
+        row2 = QHBoxLayout()
+        nv, ns = get_db().ignore_counts()
+        ign = button(f"Skipped videos & songs ({nv + ns})", "refresh")
+        ign.setToolTip(f"{nv} videos and {ns} songs you deleted are skipped by scans. "
+                       "Clearing this lets scans add them again.")
+        ign.clicked.connect(self._reset_ignored)
+        row2.addWidget(ign)
+        logs = button("Logs", "trash")
+        logs.setToolTip("Empty the log files. They name the videos that were scanned.")
+        logs.clicked.connect(self._clear_logs)
+        row2.addWidget(logs)
+        row2.addStretch(1)
+        l.addLayout(row2)
         return c
+
+    def _reset_ignored(self) -> None:
+        nv, ns = get_db().ignore_counts()
+        if self._ask(f"Forget the {nv} videos and {ns} songs you deleted?\n\n"
+                     "Scans will be able to add their music again."):
+            get_db().clear_ignored()
+            scanjob.reset_ignored_index()
+            self.build()
+            hub.toast.emit("Scans will no longer skip them.", "ok")
+
+    def _clear_logs(self) -> None:
+        if self._ask("Empty the log files? They list the videos that were scanned and what was found."):
+            from ..core import log as _log
+            _log.clear()
+            w = self.window()
+            if hasattr(w, "log_view"):
+                w.log_view.clear()
+            hub.toast.emit("Logs cleared.", "ok")
 
     def _ask(self, text: str) -> bool:
         return QMessageBox.question(self, "Reset", text) == QMessageBox.Yes

@@ -45,11 +45,12 @@ class Section:
 @dataclass
 class VideoResult:
     path: str
-    status: str            # music | partial | speech | silent | no_audio | skipped | error
+    status: str            # music | partial | speech | silent | no_audio | skipped | ignored | error
     detail: str = ""
     sections: list[Section] = field(default_factory=list)
     added: list[int] = field(default_factory=list)
     merged: list[int] = field(default_factory=list)
+    dropped: int = 0       # sections that were songs you deleted
 
 
 STATUS_TEXT = {
@@ -59,6 +60,7 @@ STATUS_TEXT = {
     "silent": "Silent",
     "no_audio": "No audio track",
     "skipped": "Already scanned",
+    "ignored": "Skipped (you deleted its songs)",
     "error": "Error",
 }
 
@@ -77,6 +79,27 @@ def fp_index() -> FingerprintIndex:
         return _fp_index
 
 
+_ignored_index: FingerprintIndex | None = None
+
+
+def ignored_index() -> FingerprintIndex:
+    """Songs you deleted and asked not to be added again."""
+    global _ignored_index
+    with _fp_lock:
+        if _ignored_index is None:
+            idx = FingerprintIndex()
+            for iid, fp in get_db().ignored_songs():
+                idx.add(iid, fp)
+            _ignored_index = idx
+        return _ignored_index
+
+
+def reset_ignored_index() -> None:
+    global _ignored_index
+    with _fp_lock:
+        _ignored_index = None
+
+
 def forget_fingerprint(song_id: int) -> None:
     with _fp_lock:
         if _fp_index is not None:
@@ -84,9 +107,10 @@ def forget_fingerprint(song_id: int) -> None:
 
 
 def reset_fp_index() -> None:
-    global _fp_index
+    global _fp_index, _ignored_index
     with _fp_lock:
         _fp_index = None
+        _ignored_index = None
 
 
 # ---------------------------------------------------------------------------
@@ -255,11 +279,22 @@ def add_or_merge(video: str, sec: Section, file: Path, sec_probs: np.ndarray, ta
     db = get_db()
     info = describe_file(file)
     fp = fingerprint(str(file))
+    if fp is not None and len(fp) > 20 and ignored_index().match(fp):
+        file.unlink(missing_ok=True)
+        res.dropped += 1
+        log.info("skipped a song you deleted earlier")
+        return
     idx = fp_index()
     match = idx.match(fp) if fp is not None and len(fp) > 20 else None
     if match:
         sid, _off, sim = match
         old = db.song(sid)
+        if old is not None and old["unlinked"]:
+            # You removed this song's video links: leave it exactly as it is.
+            file.unlink(missing_ok=True)
+            res.merged.append(sid)
+            log.info("duplicate of song %d; kept the existing copy", sid)
+            return
         if old is not None:
             better = info["duration"] > (old["duration"] or 0) + 1.0 or (
                 abs(info["duration"] - (old["duration"] or 0)) <= 1.0 and info["bitrate"] > (old["bitrate"] or 0) * 1.15)
@@ -267,7 +302,7 @@ def add_or_merge(video: str, sec: Section, file: Path, sec_probs: np.ndarray, ta
             if better:
                 old_path = Path(old["file_path"])
                 feats = song_features(file, sec_probs, tagger)
-                db.update_song(sid, file_path=str(file), partial=int(sec.check and bool(old["partial"])),
+                db.update_song(sid, file_path=str(file), partial=int(sec.check and bool(old["partial"])), tagged=0,
                                fingerprint=fp, **info, **feats)
                 idx.add(sid, fp)
                 if old_path.exists() and old_path != file:
@@ -289,11 +324,13 @@ def add_or_merge(video: str, sec: Section, file: Path, sec_probs: np.ndarray, ta
     ctx.event("song_added", sid)
 
 
-def scan_video(path: Path, ctx: JobContext) -> VideoResult:
+def scan_video(path: Path, ctx: JobContext, ignored: set[str] | None = None) -> VideoResult:
     s = get_settings()
     db = get_db()
     vp = str(path)
     st = path.stat()
+    if ignored is not None and vp.lower() in ignored:
+        return VideoResult(vp, "ignored")
     prev = db.scanned(vp)
     if prev and not s.get("scan.rescan") and prev["size"] == st.st_size and abs((prev["mtime"] or 0) - st.st_mtime) < 1e-3:
         return VideoResult(vp, "skipped", STATUS_TEXT.get(prev["result"], prev["result"]))
@@ -353,11 +390,12 @@ def scan_folders(ctx: JobContext, folders: list[str]) -> list[VideoResult]:
     songs_dir = str(s.folder("songs")).lower()
     videos = [v for v in videos if not str(v).lower().startswith(songs_dir)]
     ctx.event("total", len(videos))
+    ignored = get_db().ignored_videos()
     results = []
     for i, v in enumerate(videos):
         ctx.check()
         ctx.progress(i / max(1, len(videos)), v.name)
-        r = scan_video(v, ctx)
+        r = scan_video(v, ctx, ignored)
         results.append(r)
         ctx.event("video_done", r)
     ctx.progress(1.0, "Done")

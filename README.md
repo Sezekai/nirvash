@@ -6,6 +6,12 @@ A simple, lossless-first video tool.
 
 - **Find music** — scan folders of videos, find the music (AudioSet audio tagger), and copy it into the song library without re-encoding. Videos with talking keep only their music sections, tagged *To check* (as are songs with vocals that might be talking). The same song found in several videos is merged, keeping the best copy.
 - **Song library** — listen, favourite, categorise, delete (Recycle Bin). Songs are identified in the background with Shazam (AcoustID as an optional backup), with full length, genre and year from iTunes/MusicBrainz and lyrics from LRCLIB.
+  - Play/pause button on every row; listens are tracked (played before, times listened all the way through).
+  - Filters that combine, each with its opposite: favourite, approved, played, identified, to check, linked to videos, renamed & tagged, times listened.
+  - Folder tree of where songs came from (with subfolders) and a sortable Folder column.
+  - Rename files to *Artist - Title* and write title/artist/album/genre/year/cover tags Explorer shows; copies of the same song get their differences (length, BPM…) in the name. Nothing is overwritten and the audio isn't touched.
+  - Remove video links: forgets the source videos, renames the file and clears its tags; later scans never relink it.
+  - Delete can skip the songs' videos (and the same music) in later scans. Undo in Settings → Reset.
 - **Auto-music** — pick a folder of silent videos; Nirvash picks a song for each one by length, pace and mood, then you review, swap and export. The video stream is always copied untouched.
 
 **Stage 2** adds the editor (trims, joins, moving crop with tracking, zoom, rotate, blur/pixelate, overlays, colour).

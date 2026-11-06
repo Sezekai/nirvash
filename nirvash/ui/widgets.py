@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLayout, QPushButton, QSizePolicy, QSlider, QToolButton,
                                QVBoxLayout, QWidget)
@@ -68,6 +68,71 @@ def chip(text: str, color: str = C["violet"], filled: bool = False) -> QLabel:
     return l
 
 
+class FlowLayout(QLayout):
+    """Lays widgets out left to right and wraps onto new lines (for rows of chips and buttons)."""
+
+    def __init__(self, parent=None, spacing: int = 6):
+        super().__init__(parent)
+        self._items = []
+        self._sp = spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        from PySide6.QtCore import Qt as _Qt
+        return _Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w):
+        return self._layout(QRect(0, 0, w, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        sz = QSize()
+        for it in self._items:
+            sz = sz.expandedTo(it.minimumSize())
+        return sz
+
+    def _layout(self, rect, test: bool) -> int:
+        x, y, line = rect.x(), rect.y(), 0
+        for it in self._items:
+            hint = it.sizeHint()
+            if x + hint.width() > rect.right() + 1 and line > 0:
+                x = rect.x()
+                y += line + self._sp
+                line = 0
+            if not test:
+                it.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self._sp
+            line = max(line, hint.height())
+        return y + line - rect.y()
+
+
+def flow_row(spacing: int = 6) -> tuple[QWidget, "FlowLayout"]:
+    w = QWidget()
+    w.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+    return w, FlowLayout(w, spacing)
+
+
 def clear_layout(lay: QLayout) -> None:
     while lay.count():
         it = lay.takeAt(0)
@@ -91,6 +156,15 @@ def open_in_explorer(path: str) -> None:
     else:
         from ..media.ff import popen
         popen(["xdg-open", str(p if p.is_dir() else p.parent)])
+
+
+def open_with_default(path: str) -> bool:
+    """Open a file in whatever program Windows uses for it (like double-clicking it in Explorer)."""
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QDesktopServices
+    if not Path(path).exists():
+        return False
+    return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
 
 def cover_pixmap(path: str | None, size: int, seed: str = "", radius: int = 12) -> QPixmap:

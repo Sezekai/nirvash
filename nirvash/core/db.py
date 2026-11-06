@@ -60,12 +60,27 @@ CREATE TABLE IF NOT EXISTS song_usage (
     video_path TEXT NOT NULL, used_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS ignored_videos (path TEXT PRIMARY KEY, added_at REAL);
+CREATE TABLE IF NOT EXISTS ignored_songs (
+    id INTEGER PRIMARY KEY, fingerprint BLOB NOT NULL, duration REAL, added_at REAL
+);
 """
+
+# Columns added after the first release: (name, definition). Added to older databases on open.
+MIGRATIONS = [
+    ("played", "INTEGER NOT NULL DEFAULT 0"),        # started playing at least once
+    ("listen_count", "INTEGER NOT NULL DEFAULT 0"),  # listened all the way through
+    ("last_played", "REAL"),
+    ("approved", "INTEGER NOT NULL DEFAULT 0"),
+    ("unlinked", "INTEGER NOT NULL DEFAULT 0"),      # video links removed - never re-linked by scans
+    ("tagged", "INTEGER NOT NULL DEFAULT 0"),        # file renamed and tagged with the song info
+]
 
 SONG_FIELDS = (
     "file_path codec ext sample_rate channels bitrate duration title artist album genre year "
     "cover_url shazam_key isrc mbid full_length clip_offset lyrics_plain lyrics_synced bpm energy "
-    "pace mood partial checked favourite id_status id_source manual_info added_at"
+    "pace mood partial checked favourite id_status id_source manual_info added_at "
+    "played listen_count last_played approved unlinked tagged"
 ).split()
 
 
@@ -84,6 +99,10 @@ class DB:
         self._write_lock = threading.RLock()
         with self.conn() as c:
             c.executescript(SCHEMA)
+            have = {r[1] for r in c.execute("PRAGMA table_info(songs)")}
+            for name, decl in MIGRATIONS:
+                if name not in have:
+                    c.execute(f"ALTER TABLE songs ADD COLUMN {name} {decl}")
 
     def conn(self) -> sqlite3.Connection:
         c = getattr(self._local, "c", None)
@@ -167,6 +186,47 @@ class DB:
         self.x("INSERT OR IGNORE INTO song_categories(song_id, category_id) "
                "SELECT ?, category_id FROM song_categories WHERE song_id=?", (to_id, from_id))
 
+    def remove_sources(self, song_id: int) -> None:
+        self.x("DELETE FROM song_sources WHERE song_id=?", (song_id,))
+
+    def source_videos(self) -> dict[int, list[str]]:
+        out: dict[int, list[str]] = {}
+        for r in self.q("SELECT song_id, video_path FROM song_sources ORDER BY id"):
+            out.setdefault(r[0], []).append(r[1])
+        return out
+
+    # ---- listening ----------------------------------------------------------
+    def mark_played(self, song_id: int) -> None:
+        self.x("UPDATE songs SET played=1, last_played=? WHERE id=?", (time.time(), song_id))
+
+    def add_listen(self, song_id: int) -> None:
+        self.x("UPDATE songs SET played=1, listen_count=listen_count+1, last_played=? WHERE id=?",
+               (time.time(), song_id))
+
+    # ---- things the user deleted: never brought back by a scan ---------------
+    def ignore_video(self, path: str) -> None:
+        self.x("INSERT OR IGNORE INTO ignored_videos(path, added_at) VALUES(?,?)", (path, time.time()))
+
+    def ignored_videos(self) -> set[str]:
+        return {r[0].lower() for r in self.q("SELECT path FROM ignored_videos")}
+
+    def ignore_song(self, fp: bytes, duration: float) -> None:
+        self.x("INSERT INTO ignored_songs(fingerprint, duration, added_at) VALUES(?,?,?)", (fp, duration, time.time()))
+
+    def ignored_songs(self) -> list[tuple[int, np.ndarray]]:
+        return [(r["id"], np.frombuffer(r["fingerprint"], np.uint32)) for r in self.q("SELECT * FROM ignored_songs")]
+
+    def ignore_counts(self) -> tuple[int, int]:
+        return (int(self.one("SELECT COUNT(*) FROM ignored_videos")[0]),
+                int(self.one("SELECT COUNT(*) FROM ignored_songs")[0]))
+
+    def clear_ignored(self) -> None:
+        with self._write_lock:
+            c = self.conn()
+            c.execute("DELETE FROM ignored_videos")
+            c.execute("DELETE FROM ignored_songs")
+            c.commit()
+
     # ---- categories -------------------------------------------------------
     def categories(self) -> list[sqlite3.Row]:
         return self.q("SELECT * FROM categories ORDER BY name COLLATE NOCASE")
@@ -238,7 +298,8 @@ class DB:
     def reset_library(self) -> None:
         with self._write_lock:
             c = self.conn()
-            for t in ("song_usage", "song_categories", "song_sources", "songs", "scanned_videos", "video_features"):
+            for t in ("song_usage", "song_categories", "song_sources", "songs", "scanned_videos", "video_features",
+                      "ignored_videos", "ignored_songs"):
                 c.execute(f"DELETE FROM {t}")
             c.commit()
 

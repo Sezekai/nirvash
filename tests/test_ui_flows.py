@@ -134,7 +134,12 @@ def test_find_music_auto_music_and_library(app, tmp_path):
     import nirvash.ui.library_page as lp
     binned = []
     lp.to_recycle_bin = lambda p: (binned.append(p), Path(p).unlink(), True)[2]
+    srcs = [x["video_path"] for x in get_db().sources(sid)]
+    lib.ask_delete = lambda ids: (True, True)
     lib.delete([sid])
+    assert wait_for(app, lambda: lib.batch is None), "delete didn't finish"
     assert get_db().song(sid) is None and binned
+    assert {v.lower() for v in srcs} <= get_db().ignored_videos()
+    assert get_db().ignore_counts()[1] == 1
     w.identify.stop()
     w.close()

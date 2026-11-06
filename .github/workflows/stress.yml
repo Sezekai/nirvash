@@ -64,5 +64,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "stress crashed under page heap: $LASTEXITCODE" }
           python -u tests/playback_stress.py 2>&1 | Out-String -Stream | Select-Object -Last 6
           if ($LASTEXITCODE -ne 0) { throw "playback crashed under page heap: $LASTEXITCODE" }
-          python -m pytest -q -p no:cacheprovider tests/test_ui_flows.py tests/test_ownership.py
+          python -m pytest -q -p no:cacheprovider tests/test_ui_flows.py tests/test_ownership.py tests/test_library_ui.py tests/test_library_ops.py
           if ($LASTEXITCODE -ne 0) { throw "UI tests failed under page heap" }

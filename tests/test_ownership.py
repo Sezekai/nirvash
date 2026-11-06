@@ -70,11 +70,11 @@ def test_views_own_their_delegates_and_models(tmp_path, monkeypatch):
                         problems.append(f"{name}: row {r} delegate {type(rd).__name__} has no owner")
     assert not problems, problems
     from PySide6.QtWidgets import QStyledItemDelegate
-    from nirvash.ui.library_page import ChipDelegate
-    owned = [d for d in w.library.table.findChildren(QStyledItemDelegate) if isinstance(d, ChipDelegate)]
-    assert len(owned) == 2, "library Category/Status delegates must be children of the table"
-    for col in (8, 9):
-        assert w.library.table.itemDelegateForColumn(col) in owned
+    from nirvash.ui.library_page import COL, ChipDelegate, PlayDelegate
+    owned = [d for d in w.library.table.findChildren(QStyledItemDelegate) if isinstance(d, (ChipDelegate, PlayDelegate))]
+    assert len(owned) == 3, "library Play/Category/Status delegates must be children of the table"
+    for key in ("play", "cats", "status"):
+        assert w.library.table.itemDelegateForColumn(COL[key]) in owned
     # And it actually paints the rows with those delegates after a collection.
     w.go("library")
     w.resize(1400, 800)

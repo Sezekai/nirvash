@@ -59,7 +59,13 @@ for i, (t, a, g, bpm, full, dur, mood, st, fav, partial) in enumerate(demo):
                       energy=0.6, pace=0.6, clip_offset=31.0 if full else None, album="Single" if t else None,
                       year="2021" if t else None,
                       lyrics_plain="Line one of the lyrics\nLine two\n\nChorus line" if st == "found" else None)
-    db.add_source(sid, f"E:\\Pictures\\IMGs\\Gifs & Vids\\video_{i:02d}.mp4", 0, dur)
+    sub = ["Anime", "Anime/Openings", "Edits", "Anime/Openings", "Edits/2024", "Anime", "Edits"][i]
+    if i != 4:
+        base = "E:\\Pictures\\IMGs\\Gifs & Vids\\" if REAL else "/media/Pictures/IMGs/Gifs & Vids/"
+        db.add_source(sid, base + (sub.replace("/", "\\") if REAL else sub) + f"{'\\' if REAL else '/'}video_{i:02d}.mp4",
+                      0, dur)
+    db.update_song(sid, played=int(i % 3 != 2), listen_count=[2, 0, 0, 5, 0, 1, 3][i], approved=int(i in (0, 3, 5)),
+                   last_played=1.7e9 if i % 3 != 2 else None)
     if i % 2 == 0:
         db.set_song_category(sid, cats[i % 4], True)
     if i == 0:
@@ -143,6 +149,16 @@ def shoot():
         for _ in range(20):
             app.processEvents()
         w.grab().save(str(OUT / f"{key}.png"))
+    w.go("library")
+    w.resize(1900, 1000)
+    w.library.set_filter("approved", 1)
+    w.library.set_filter("identified", 2) if False else None
+    w.library.set_filter("played", 2)
+    for _ in range(20):
+        app.processEvents()
+    w.grab().save(str(OUT / "library_filtered.png"))
+    w.library.clear_filters()
+    w.resize(1480, 900)
     w.toast.show_msg("Exported 2 videos next to the originals.", "ok")
     app.processEvents()
     w.grab().save(str(OUT / "toast.png"))

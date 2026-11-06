@@ -42,6 +42,34 @@ def setup() -> logging.Logger:
     return log
 
 
+def clear() -> int:
+    """Empty the log files (they name the videos that were scanned). Returns how many files were cleared."""
+    n = 0
+    d = paths.data_dir() / "logs"
+    log = logging.getLogger("nirvash")
+    for h in log.handlers:
+        if isinstance(h, logging.FileHandler):
+            h.acquire()
+            try:
+                if h.stream:
+                    h.stream.seek(0)
+                    h.stream.truncate()
+                    n += 1
+            finally:
+                h.release()
+    for f in list(d.glob("nirvash.log.*")) + [d / "crash.log"]:
+        try:
+            if f.exists():
+                f.write_text("", encoding="utf-8") if f.name == "crash.log" else f.unlink()
+                n += 1
+        except OSError:
+            pass
+    if not log.handlers and (d / "nirvash.log").exists():
+        (d / "nirvash.log").write_text("", encoding="utf-8")
+        n += 1
+    return n
+
+
 def add_listener(fn: Callable[[str, str], None]) -> None:
     with _lock:
         _listeners.append(fn)

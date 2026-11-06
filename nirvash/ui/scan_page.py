@@ -18,7 +18,8 @@ from .theme import C, icon
 from .widgets import TaskProgress, Toggle, button, card, label, open_in_explorer, tool
 
 RESULT_COLOURS = {"music": C["teal"], "partial": C["pink"], "speech": C["muted"], "silent": C["faint"],
-                  "no_audio": C["faint"], "skipped": C["faint"], "error": C["red"]}
+                  "no_audio": C["faint"], "skipped": C["faint"], "ignored": C["faint"],
+                  "error": C["red"]}
 
 
 class Stat(QWidget):
@@ -270,6 +271,8 @@ class ScanPage(QWidget):
             lib.append(f"{len(r.added)} added")
         if r.merged:
             lib.append(f"{len(r.merged)} duplicate{'s' if len(r.merged) > 1 else ''}")
+        if r.dropped:
+            lib.append(f"{r.dropped} you deleted before")
         li = QTableWidgetItem(", ".join(lib))
         li.setForeground(QColor(C["teal"] if r.added else C["muted"]))
         self.table.setItem(row, 3, li)
