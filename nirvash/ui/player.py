@@ -120,7 +120,8 @@ class Player(QWidget):
         # No Lua scripts: Nirvash draws its own controls, and mpv's built-in scripts (on-screen controller, stats,
         # console, ...) run LuaJIT, which raises internal exceptions constantly. Older libmpv builds may not know
         # every switch, so unknown ones are dropped.
-        extra = dict(load_scripts=False, ytdl=False, config=False, terminal=False, input_terminal=False,
+        extra = dict(audio_fallback_to_null=True, load_scripts=False, ytdl=False, config=False, terminal=False,
+                     input_terminal=False,
                      load_stats_overlay=False, load_osd_console=False, load_auto_profiles=False,
                      load_select=False, load_commands=False, load_positioning=False, load_context_menu=False)
         if os.environ.get("NIRVASH_MPV_SCRIPTS"):   # test switch: the old behaviour
