@@ -36,6 +36,7 @@ jobs:
           $env:PATH = "$PWD\bin;$env:PATH"
           python -u tests/playback_stress.py 2>&1 | Out-String -Stream | Select-Object -Last 8
           "old setup exit: $LASTEXITCODE"
+          exit 0
 
       - name: Playback - current code, 3 runs
         shell: pwsh
