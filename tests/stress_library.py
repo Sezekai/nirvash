@@ -137,17 +137,27 @@ lib.set_filter("identified", 2)
 pump(0.2)
 lib.clear_filters()
 tree = lib.folder_tree
-items, stack = [], [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
-while stack:
-    it = stack.pop()
-    items.append(it)
-    stack += [it.child(i) for i in range(it.childCount())]
-for it in items[:80]:
-    tree.setCurrentItem(it)
-    it.setExpanded(True)
+
+
+def tree_items():
+    # The tree is rebuilt when new songs arrive (the churn thread adds some), so look items up fresh each time.
+    out, stack = [], [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+    while stack:
+        it = stack.pop()
+        out.append(it)
+        stack += [it.child(i) for i in range(it.childCount())]
+    return out
+
+
+keys = [it.data(0, Qt.UserRole) for it in tree_items()][:80]
+for k in keys:
+    it = next((x for x in tree_items() if x.data(0, Qt.UserRole) == k), None)
+    if it is not None:
+        tree.setCurrentItem(it)
+        it.setExpanded(True)
     pump(0.02)
 tree.setCurrentItem(tree.topLevelItem(0))
-print("filters and folders", len(items), flush=True)
+print("filters and folders", len(keys), flush=True)
 for sid in (1, 2, 3):
     lib.select_song(sid)
     pump(0.1)
