@@ -24,8 +24,27 @@ jobs:
         shell: pwsh
         run: |
           $env:PATH = "$PWD\bin;$env:PATH"
-          python -u -X faulthandler tests/stress_library.py 1600 2>&1 | Out-String -Stream
+          python -u tests/stress_library.py 1600 2>&1 | Out-String -Stream
           if ($LASTEXITCODE -ne 0) { throw "stress failed: $LASTEXITCODE" }
+
+      - name: Playback - old setup (Python faulthandler + mpv scripts) to show the cause
+        shell: pwsh
+        env:
+          NIRVASH_OLD_CRASHLOG: "1"
+          NIRVASH_MPV_SCRIPTS: "1"
+        run: |
+          $env:PATH = "$PWD\bin;$env:PATH"
+          python -u tests/playback_stress.py 2>&1 | Out-String -Stream | Select-Object -Last 8
+          "old setup exit: $LASTEXITCODE"
+
+      - name: Playback - current code, 3 runs
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\bin;$env:PATH"
+          foreach ($i in 1..3) {
+            python -u tests/playback_stress.py 2>&1 | Out-String -Stream | Select-Object -Last 6
+            if ($LASTEXITCODE -ne 0) { throw "playback run $i failed: $LASTEXITCODE" }
+          }
 
       # Full page heap: any use of freed memory crashes at once instead of by luck.
       - name: Turn on full page heap for python.exe
@@ -40,7 +59,9 @@ jobs:
         shell: pwsh
         run: |
           $env:PATH = "$PWD\bin;$env:PATH"
-          python -u -X faulthandler tests/stress_library.py 300 2>&1 | Out-String -Stream | Select-Object -Last 15
+          python -u tests/stress_library.py 300 2>&1 | Out-String -Stream | Select-Object -Last 15
           if ($LASTEXITCODE -ne 0) { throw "stress crashed under page heap: $LASTEXITCODE" }
+          python -u tests/playback_stress.py 2>&1 | Out-String -Stream | Select-Object -Last 6
+          if ($LASTEXITCODE -ne 0) { throw "playback crashed under page heap: $LASTEXITCODE" }
           python -m pytest -q -p no:cacheprovider tests/test_ui_flows.py tests/test_ownership.py
           if ($LASTEXITCODE -ne 0) { throw "UI tests failed under page heap" }

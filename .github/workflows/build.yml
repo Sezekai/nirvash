@@ -59,11 +59,11 @@ jobs:
         shell: pwsh
         run: |
           $env:PATH = "$PWD\bin;$env:PATH"
-          python -u -X faulthandler tests/mpv_smoke.py raw 2>&1 | Out-String -Stream
+          python -u tests/mpv_smoke.py raw 2>&1 | Out-String -Stream
           "raw exit: $LASTEXITCODE"
-          python -u -X faulthandler tests/mpv_smoke.py full 2>&1 | Out-String -Stream
+          python -u tests/mpv_smoke.py full 2>&1 | Out-String -Stream
           "full exit: $LASTEXITCODE"
-          python -u -X faulthandler tests/screenshots.py "$PWD\shots" 2>&1 | Out-String -Stream
+          python -u tests/screenshots.py "$PWD\shots" 2>&1 | Out-String -Stream
           "exit code: $LASTEXITCODE"
 
       - name: Build app

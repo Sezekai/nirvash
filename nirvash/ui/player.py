@@ -117,7 +117,30 @@ class Player(QWidget):
                         background="color", background_color="#05060a")
         else:
             opts.update(vid="no", force_window="no", vo="null")
-        m = mpv.MPV(**opts)
+        # No Lua scripts: Nirvash draws its own controls, and mpv's built-in scripts (on-screen controller, stats,
+        # console, ...) run LuaJIT, which raises internal exceptions constantly. Older libmpv builds may not know
+        # every switch, so unknown ones are dropped.
+        extra = dict(load_scripts=False, ytdl=False, config=False, terminal=False, input_terminal=False,
+                     load_stats_overlay=False, load_osd_console=False, load_auto_profiles=False,
+                     load_select=False, load_commands=False, load_positioning=False, load_context_menu=False)
+        if os.environ.get("NIRVASH_MPV_SCRIPTS"):   # test switch: the old behaviour
+            extra = {}
+        m = None
+        for _ in range(len(extra) + 1):
+            try:
+                m = mpv.MPV(**opts, **extra)
+                break
+            except Exception as e:
+                msg = str(e).replace("-", "_")
+                bad = [k for k in extra if k in msg]
+                if not bad:
+                    log.warning("mpv rejected the script switches (%s); starting without them", e)
+                    extra = {}
+                    continue
+                for k in bad:
+                    extra.pop(k)
+        if m is None:
+            m = mpv.MPV(**opts)
         m.observe_property("time-pos", lambda _n, v: self._b.pos.emit(float(v or 0.0)))
         m.observe_property("duration", lambda _n, v: self._b.dur.emit(float(v or 0.0)))
         m.observe_property("pause", lambda _n, v: self._b.pause.emit(bool(v)))

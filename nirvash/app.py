@@ -62,18 +62,10 @@ def selftest(out: str) -> int:
 
 def _crash_log() -> None:
     """Write native crashes (which skip Python's error handling) to logs/crash.log."""
-    import faulthandler
-    import time
-
-    from .core import paths
+    from .core import crashlog, paths
 
     try:
-        d = paths.ensure(paths.data_dir() / "logs")
-        fh = open(d / "crash.log", "a", encoding="utf-8")
-        fh.write(f"\n=== started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
-        fh.flush()
-        faulthandler.enable(file=fh, all_threads=True)
-        globals()["_crash_fh"] = fh
+        crashlog.install(paths.ensure(paths.data_dir() / "logs"))
     except Exception:
         pass
 
