@@ -185,7 +185,7 @@ class IdentifyQueue:
 
     def _status(self, msg: str) -> None:
         self.current = msg
-        if self.on_status:
+        if self.on_status and not self._stop.is_set():
             self.on_status({"pending": self.pending(), "current": msg, "done": self.done,
                             "started": self.started, "busy": bool(msg)})
 
@@ -215,5 +215,8 @@ class IdentifyQueue:
                 log.exception("identify failed")
                 get_db().update_song(row["id"], id_status="error")
             self.done += 1
-            if self.on_change:
-                self.on_change(row["id"])
+            if self.on_change and not self._stop.is_set():
+                try:
+                    self.on_change(row["id"])
+                except RuntimeError:      # the window closed while this lookup ran
+                    return
