@@ -94,7 +94,7 @@ def churn():
         sid = r.randint(1, N)
         db.update_song(sid, id_status=r.choice(st), title=s(r), genre=r.choice(["Pop 🎵", "J-Rock", None]))
         hub.songChanged.emit(sid)
-        hub.identifyStatus.emit(r.randint(0, 300), s(r))
+        hub.identifyStatus.emit({"pending": r.randint(0, 300), "current": s(r), "done": n, "started": 0, "busy": True})
         n += 1
         if n % 50 == 0:
             new = db.add_song(file_path=str(songs_dir / f"new {n}.m4a"), duration=30.0, title=s(r), id_status="pending")

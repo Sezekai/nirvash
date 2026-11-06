@@ -113,6 +113,7 @@ class ScanPage(QWidget):
         self.task = TaskProgress()
         self.task.detail.setText("Ready")
         self.task.times.setText("")
+        self.task.pct.setText("")
         rl.addWidget(self.task)
         btns = QHBoxLayout()
         self.go = button("Find music", "sparkle", "primary")

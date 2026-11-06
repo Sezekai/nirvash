@@ -250,8 +250,8 @@ class DetailPanel(QScrollArea):
         self.page = page
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.NoFrame)
-        self.setMinimumWidth(330)
-        self.setMaximumWidth(420)
+        self.setMinimumWidth(300)
+        self.setMaximumWidth(400)
         inner = QWidget()
         inner.setObjectName("page")
         self.setWidget(inner)
@@ -504,16 +504,21 @@ class LibraryPage(QWidget):
         hh.setHighlightSections(False)
         hh.setStretchLastSection(False)
         hh.setSectionResizeMode(QHeaderView.Interactive)
-        for i, w in enumerate((34, 200, 130, 56, 70, 46, 90, 110, 120, 128)):
+        for i, w in enumerate((32, 200, 140, 60, 64, 44, 92, 112, 110, 104)):
             self.table.setColumnWidth(i, w)
         hh.setSectionResizeMode(0, QHeaderView.Fixed)
+        # Title and Artist share whatever room is left, so nothing scrolls sideways.
         hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.setTextElideMode(Qt.ElideRight)
         hh.setMinimumSectionSize(30)
         hh.setContextMenuPolicy(Qt.CustomContextMenu)
         hh.customContextMenuRequested.connect(self._header_menu)
-        for col in get_settings().get("ui.hidden_columns", [4]) or []:
-            if 1 < col < len(COLS):
-                self.table.setColumnHidden(col, True)
+        self.user_hidden = {c for c in (get_settings().get("ui.hidden_columns", [4]) or []) if 1 < c < len(COLS)}
+        self.auto_hidden: set[int] = set()
+        self.table.viewport().installEventFilter(self)
+        self._apply_columns()
         self.chip_delegates = [ChipDelegate(self.model, "cats", self.table),
                                ChipDelegate(self.model, "status", self.table)]
         self.table.setItemDelegateForColumn(8, self.chip_delegates[0])
@@ -528,7 +533,7 @@ class LibraryPage(QWidget):
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
         split.setStretchFactor(2, 0)
-        split.setSizes([210, 900, 360])
+        split.setSizes([200, 940, 320])
         root.addWidget(split, 1)
 
         self.player = Player(self, video=False)
@@ -841,14 +846,44 @@ class LibraryPage(QWidget):
         for col in range(2, len(COLS)):
             a = m.addAction(COLS[col])
             a.setCheckable(True)
-            a.setChecked(not self.table.isColumnHidden(col))
+            a.setChecked(col not in self.user_hidden)
+            if col in self.auto_hidden:
+                a.setText(f"{COLS[col]}  (hidden — window too narrow)")
             a.toggled.connect(lambda on, c=col: self._show_col(c, on))
         m.exec(self.table.horizontalHeader().mapToGlobal(pos))
 
     def _show_col(self, col: int, on: bool) -> None:
-        self.table.setColumnHidden(col, not on)
-        hidden = [c for c in range(2, len(COLS)) if self.table.isColumnHidden(c)]
-        get_settings().set("ui.hidden_columns", hidden)
+        (self.user_hidden.discard if on else self.user_hidden.add)(col)
+        get_settings().set("ui.hidden_columns", sorted(self.user_hidden))
+        self._apply_columns()
+
+    # When the table is narrow, drop the least important columns so titles stay readable.
+    AUTO_HIDE_ORDER = (7, 5, 4, 6, 3)          # Mood, BPM, Full song, Genre, Length
+    WIDTHS = {3: 60, 4: 64, 5: 44, 6: 92, 7: 112, 8: 110, 9: 104}
+    MIN_TEXT = 300                              # Title + Artist together
+
+    def _apply_columns(self) -> None:
+        avail = self.table.viewport().width()
+        if avail <= 50:
+            avail = 900
+        hidden = set(self.user_hidden)
+        fixed = lambda: 32 + sum(w for c, w in self.WIDTHS.items() if c not in hidden)
+        auto = set()
+        for c in self.AUTO_HIDE_ORDER:
+            if avail - fixed() >= self.MIN_TEXT:
+                break
+            if c not in hidden:
+                hidden.add(c)
+                auto.add(c)
+        self.auto_hidden = auto
+        for c in range(2, len(COLS)):
+            self.table.setColumnHidden(c, c in hidden)
+
+    def eventFilter(self, obj, ev):
+        from PySide6.QtCore import QEvent
+        if obj is self.table.viewport() and ev.type() == QEvent.Resize:
+            QTimer.singleShot(0, self._apply_columns)
+        return super().eventFilter(obj, ev)
 
     def _table_menu(self, pos) -> None:
         ids = self.selected()
