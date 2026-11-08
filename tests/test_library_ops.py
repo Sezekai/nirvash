@@ -200,7 +200,7 @@ def test_scan_skips_deleted_and_never_relinks(env, monkeypatch):
 
 
 def test_identify_methods(env, monkeypatch):
-    """One-off service choices, trying harder with speed changes, AudD as a backup."""
+    """One-off service choices, trying harder with speed changes, AudioTag as a backup."""
     import numpy as np
 
     from nirvash.core.db import get_db
@@ -224,23 +224,23 @@ def test_identify_methods(env, monkeypatch):
     monkeypatch.setattr(services, "itunes", lambda *a: None)
     monkeypatch.setattr(services, "musicbrainz", lambda *a: None)
     monkeypatch.setattr(services, "lrclib", lambda *a: None)
-    monkeypatch.setattr(services, "audd", lambda *a: calls.append(("audd",)) or None)
+    monkeypatch.setattr(services, "audiotag", lambda *a: calls.append(("audiotag", round(len(a[0]) / a[1]))) or None)
     monkeypatch.setattr(services, "acoustid", lambda *a: calls.append(("acoustid",)) or None)
     s = get_settings()
     s.set("identify.acoustid_key", "k")
-    s.set("identify.audd", True)
-    s.set("identify.audd_token", "t")
+    s.set("identify.audiotag_key", "t")
 
-    # AcoustID only: Shazam and AudD aren't touched, and the one-off choice is cleared afterwards.
+    # AcoustID only: Shazam and AudioTag aren't touched, and the one-off choice is cleared afterwards.
     db.update_song(sid, id_methods="acoustid")
     identify.identify_song(sid)
     assert [c[0] for c in calls] == ["acoustid"] and db.song(sid)["id_methods"] is None
     assert db.song(sid)["id_status"] == "not_found"
 
-    # Usual order: Shazam (3 parts), AcoustID, then AudD (2 parts).
+    # Usual order: Shazam (3 parts), AcoustID, then AudioTag (one 15 s part).
     calls.clear()
     identify.identify_song(sid)
-    assert [c[0] for c in calls] == ["shazam"] * 3 + ["acoustid", "audd", "audd"], calls
+    assert [c[0] for c in calls] == ["shazam"] * 3 + ["acoustid", "audiotag"], calls
+    assert calls[-1][1] == 15
 
     # Trying harder: 5 parts, then speed changes, until one matches.
     calls.clear()
@@ -255,3 +255,33 @@ def test_identify_methods(env, monkeypatch):
     y = np.zeros(16000 * 40, np.float32)
     for sp in identify.SPEEDS:
         assert abs(len(identify.respeed(y, 16000, 5, sp)) / 16000 - 12) < 0.01
+
+
+def test_audiotag_parsing(monkeypatch):
+    """AudioTag: identify -> poll get_result until found; tracks are [name, artist, album, year]."""
+    import numpy as np
+
+    from nirvash.lookup import services
+
+    sent = []
+    replies = iter([
+        {"success": True, "token": "abc", "job_status": "wait"},
+        {"success": True, "result": "wait"},
+        {"success": True, "result": "found", "data": [
+            {"tracks": [["Low", "B", "Alb", 1999]], "confidence": 40, "time": "0 - 15"},
+            {"tracks": [["Hello Mr. Monkey", "Arabesque", "Grand Collection", 2001]], "confidence": 90}]},
+    ])
+
+    def post(data, files=None, timeout=60):
+        sent.append((data["action"], files))
+        return next(replies)
+
+    monkeypatch.setattr(services, "_audiotag_post", post)
+    monkeypatch.setattr(services.time, "sleep", lambda s: None)
+    info = services.audiotag(np.zeros(16000 * 15, np.float32), 16000, "k")
+    assert info == {"title": "Hello Mr. Monkey", "artist": "Arabesque", "album": "Grand Collection", "year": "2001"}
+    assert [a for a, _ in sent] == ["identify", "get_result", "get_result"]
+    wav = sent[0][1]["file"][1]
+    assert len(wav) < 16000 * 15 * 2 // 2 + 100          # sent as 8 kHz
+    assert services.AudioTagError("AudioTag: api key unrecognized").stop
+    assert not services.AudioTagError("AudioTag: audio duration is too short").stop

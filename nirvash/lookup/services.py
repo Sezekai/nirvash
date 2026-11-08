@@ -1,4 +1,4 @@
-"""Online song lookups: Shazam, AcoustID + MusicBrainz, AudD, iTunes, LRCLIB."""
+"""Online song lookups: Shazam, AcoustID + MusicBrainz, AudioTag, iTunes, LRCLIB."""
 from __future__ import annotations
 
 import asyncio
@@ -46,7 +46,6 @@ class RateLimiter:
 SHAZAM_LIMIT = RateLimiter(18, 60.0)   # Shazam allows about 20 a minute
 MB_LIMIT = RateLimiter(1, 1.1)         # MusicBrainz: 1 request per second
 ITUNES_LIMIT = RateLimiter(18, 60.0)
-AUDD_LIMIT = RateLimiter(20, 60.0)
 
 
 def wav_bytes(y: np.ndarray, sr: int) -> bytes:
@@ -122,58 +121,75 @@ def shazam(y: np.ndarray, sr: int, cancel: threading.Event | None = None) -> dic
     return info
 
 
-# ---- AudD (optional, needs your own token: 300 free lookups, then paid) ------
-class AudDError(RuntimeError):
-    def __init__(self, msg: str, code: int | None = None):
-        super().__init__(msg)
-        self.code = code
+# ---- AudioTag.info (optional, needs your own key: 3 hours of audio a month free) ----
+AUDIOTAG_URL = "https://audiotag.info/api"
+AUDIOTAG_SECONDS = 15          # audio sent per song: AudioTag recommends 15-30 s; the free budget is counted in seconds
 
+
+class AudioTagError(RuntimeError):
     @property
     def stop(self) -> bool:
-        """Errors that will happen for every song (bad token, no lookups left): stop using AudD this run."""
-        return self.code in (900, 901, 902, 903, 904)
+        """Errors that will happen for every song (bad key, free time used up): stop using AudioTag this run."""
+        m = str(self).lower()
+        return any(w in m for w in ("api key", "apikey", "balance", "credit", "limit", "expired", "disabled"))
 
 
-def _mmss(t: str | None) -> float | None:
-    try:
-        parts = [float(x) for x in (t or "").split(":")]
-    except ValueError:
-        return None
-    v = 0.0
-    for x in parts:
-        v = v * 60 + x
-    return v if parts else None
-
-
-def audd(y: np.ndarray, sr: int, token: str) -> dict | None:
-    """Recognise about 12 s of audio with AudD (https://audd.io)."""
-    AUDD_LIMIT.wait()
-    r = _http.post("https://api.audd.io/", data={"api_token": token, "return": "apple_music"},
-                   files={"file": ("clip.wav", wav_bytes(y, sr), "audio/wav")}, timeout=60)
+def _audiotag_post(data: dict, files=None, timeout: float = 60) -> dict:
+    r = _http.post(AUDIOTAG_URL, data=data, files=files, timeout=timeout)
     r.raise_for_status()
-    data = r.json()
-    if data.get("status") == "error":
-        err = data.get("error") or {}
-        raise AudDError(f"AudD: {err.get('error_message', 'error')}", err.get("error_code"))
-    res = data.get("result")
-    if not res or not res.get("title"):
+    try:
+        out = r.json()
+    except ValueError:
+        raise AudioTagError(f"AudioTag: unexpected reply ({r.text[:80]!r})")
+    if not out.get("success"):
+        raise AudioTagError(f"AudioTag: {out.get('error') or 'error'}")
+    return out
+
+
+def audiotag_stat(key: str) -> dict:
+    """Account status: identification_free_sec_remainder, queries_count, expiration_date…"""
+    return _audiotag_post({"action": "stat", "apikey": key}, timeout=20)
+
+
+def audiotag(y: np.ndarray, sr: int, key: str, cancel: threading.Event | None = None) -> dict | None:
+    """Recognise a mono chunk with AudioTag.info. Sent as 8 kHz 16-bit WAV, as their docs recommend."""
+    if sr % 8000 == 0 and sr > 8000:
+        k = sr // 8000
+        y = y[: len(y) // k * k].reshape(-1, k).mean(axis=1)
+        sr = 8000
+    job = _audiotag_post({"action": "identify", "apikey": key},
+                         files={"file": ("clip.wav", wav_bytes(y, sr), "audio/wav")})
+    token = job.get("token")
+    if not token:
+        raise AudioTagError("AudioTag: no job token in the reply")
+    res: dict = {}
+    for _ in range(100):                 # their docs: poll every 0.5 s, up to 100 times
+        if cancel is not None and cancel.wait(0.5):
+            raise InterruptedError()
+        if cancel is None:
+            time.sleep(0.5)
+        res = _audiotag_post({"action": "get_result", "token": token, "apikey": key}, timeout=20)
+        if res.get("result") != "wait":
+            break
+    if res.get("result") != "found":
         return None
-    info: dict = {"title": res.get("title"), "artist": res.get("artist"), "album": res.get("album")}
-    if res.get("release_date"):
-        info["year"] = str(res["release_date"])[:4]
-    am = res.get("apple_music") or {}
-    if am.get("durationInMillis"):
-        info["full_length"] = am["durationInMillis"] / 1000.0
-    if am.get("genreNames"):
-        info["genre"] = am["genreNames"][0]
-    if am.get("isrc"):
-        info["isrc"] = am["isrc"]
-    art = (am.get("artwork") or {}).get("url")
-    if art:
-        info["cover_url"] = art.replace("{w}", "600").replace("{h}", "600")
-    off = _mmss(res.get("timecode"))
-    if off is not None:
-        info["match_offset"] = off
+    best = None
+    for d in res.get("data") or []:
+        for t in d.get("tracks") or []:
+            if isinstance(t, dict):
+                t = [t.get("name") or t.get("title"), t.get("artist"), t.get("album"), t.get("year")]
+            if not t or not t[0]:
+                continue
+            conf = float(d.get("confidence") or 0)
+            if best is None or conf > best[0]:
+                best = (conf, t)
+    if best is None:
+        return None
+    t = list(best[1]) + [None] * 4
+    info = {"title": str(t[0]).strip(), "artist": (str(t[1]).strip() or None) if t[1] else None,
+            "album": (str(t[2]).strip() or None) if t[2] else None}
+    if t[3]:
+        info["year"] = str(t[3])[:4]
     return info
 
 

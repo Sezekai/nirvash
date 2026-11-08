@@ -470,10 +470,12 @@ class LookupDialog(QDialog):
         add("acoustid", "AcoustID", "Free. Matches whole songs, so it rarely finds short clips.", False)
         self.key.setContentsMargins(26, 0, 0, 0)
         lay.addWidget(self.key)
-        self.tok = QLineEdit(self.s.get("identify.audd_token", ""))
-        self.tok.setPlaceholderText("AudD token - from dashboard.audd.io")
+        self.tok = QLineEdit(self.s.get("identify.audiotag_key", ""))
+        self.tok.setPlaceholderText("AudioTag key - free from audiotag.info (API → API keys)")
         self.tok.setEchoMode(QLineEdit.PasswordEchoOnEdit)
-        add("audd", "AudD", "300 free lookups per account, then paid ($5 per 1,000). Up to 2 per song.", False)
+        add("audiotag", "AudioTag", "3 hours of audio a month free; uses 15 s per song (about 700 songs a month). "
+            "Check what's left in Settings.", False)
+        self.tok.setContentsMargins(26, 0, 0, 0)
         lay.addWidget(self.tok)
         self.key.textChanged.connect(self._update)
         self.tok.textChanged.connect(self._update)
@@ -496,15 +498,15 @@ class LookupDialog(QDialog):
 
     def _update(self) -> None:
         self.key.setVisible(self.boxes["acoustid"].isChecked())
-        self.tok.setVisible(self.boxes["audd"].isChecked())
+        self.tok.setVisible(self.boxes["audiotag"].isChecked())
         m = self.methods()
-        missing = ("acoustid" in m and not self.key.text().strip()) or ("audd" in m and not self.tok.text().strip())
+        missing = ("acoustid" in m and not self.key.text().strip()) or ("audiotag" in m and not self.tok.text().strip())
         self.ok.setEnabled(bool(m) and not missing)
         if not m:
             self.est.setText("Pick at least one.")
             return
         if missing:
-            self.est.setText("Enter the key / token above first.")
+            self.est.setText("Enter the key above first.")
             return
         sh = [x for x in m if x in ("shazam", "deep")]
         n_sh = sum(self._count(sh, d) for d in self.durs) if sh else 0
@@ -514,17 +516,18 @@ class LookupDialog(QDialog):
             mins = n_sh / 18
             txt += (f" - at most about {mins / 60:.1f} hours" if mins >= 90 else f" - at most about {max(1, round(mins))} min")
             txt += " at Shazam's limit. It stops early for each song as soon as one finds it."
-        if "audd" in m:
-            txt += f" Uses up to {2 * len(self.durs):,} AudD lookups."
+        if "audiotag" in m:
+            secs = 15 * len(self.durs)
+            txt += f" Uses up to {secs // 60:,} min of your AudioTag free time (3 hours a month)."
         self.est.setText(txt)
 
     def _accept(self) -> None:
         if self.boxes["acoustid"].isChecked():
             self.s.set("identify.acoustid_key", self.key.text().strip())
-        if self.boxes["audd"].isChecked():
-            self.s.set("identify.audd_token", self.tok.text().strip())
-            from ..jobs.identify import reset_audd
-            reset_audd()
+        if self.boxes["audiotag"].isChecked():
+            self.s.set("identify.audiotag_key", self.tok.text().strip())
+            from ..jobs.identify import reset_audiotag
+            reset_audiotag()
         self.accept()
 
 
@@ -811,7 +814,7 @@ class LibraryPage(QWidget):
         head.addWidget(self.count_lbl)
         head.addStretch(1)
         self.lookup_btn = button("Look up unidentified", "refresh")
-        self.lookup_btn.setToolTip("Look up every song that wasn't identified again - pick Shazam, AcoustID or AudD")
+        self.lookup_btn.setToolTip("Look up every song that wasn't identified again - pick Shazam, AcoustID or AudioTag")
         self.lookup_btn.clicked.connect(self.lookup_unidentified)
         head.addWidget(self.lookup_btn)
         self.sel_btn = QToolButton()
@@ -1443,7 +1446,7 @@ class LibraryPage(QWidget):
         if not methods:
             return
         self.reidentify(ids, methods)
-        names = {"shazam": "Shazam", "deep": "Shazam (trying harder)", "acoustid": "AcoustID", "audd": "AudD"}
+        names = {"shazam": "Shazam", "deep": "Shazam (trying harder)", "acoustid": "AcoustID", "audiotag": "AudioTag"}
         hub.toast.emit(f"Looking up {len(ids)} song{'s' if len(ids) != 1 else ''} with "
                        f"{' + '.join(names[m] for m in methods)} in the background.", "ok")
 

@@ -1,4 +1,4 @@
-"""Background song identification: Shazam first, AcoustID and AudD as backups, then extra info and lyrics."""
+"""Background song identification: Shazam first, AcoustID and AudioTag as backups, then extra info and lyrics."""
 from __future__ import annotations
 
 import threading
@@ -49,15 +49,15 @@ def _merge(dst: dict, src: dict | None, keys: tuple[str, ...], overwrite: bool =
             dst[k] = v
 
 
-METHODS = ("shazam", "deep", "acoustid", "audd")
+METHODS = ("shazam", "deep", "acoustid", "audiotag")
 # Speeds to play a clip at when it may be a sped-up or slowed-down edit: 0.8 undoes a 1.25x speed-up.
 SPEEDS = (0.8, 0.87, 0.92, 1.1, 1.2)
-_audd_off = threading.Event()          # set when AudD says the token is bad or out of lookups
+_audiotag_off = threading.Event()      # set when AudioTag says the key is bad or the free time is used up
 
 
-def reset_audd() -> None:
-    """Try AudD again (after a new token or more lookups were bought)."""
-    _audd_off.clear()
+def reset_audiotag() -> None:
+    """Try AudioTag again (after a new key, or a new month)."""
+    _audiotag_off.clear()
 
 
 def respeed(y: np.ndarray, sr: int, start: float, speed: float, seconds: float = SEG) -> np.ndarray | None:
@@ -80,8 +80,8 @@ def methods_for(row, s) -> list[str]:
         out.append("shazam")
     if (s.get("identify.acoustid_key") or "").strip():
         out.append("acoustid")
-    if s.get("identify.audd", False) and (s.get("identify.audd_token") or "").strip():
-        out.append("audd")
+    if (s.get("identify.audiotag_key") or "").strip():
+        out.append("audiotag")
     return out
 
 
@@ -93,7 +93,7 @@ def lookup_count(methods: list[str], duration: float) -> int:
         n += segs
     if "deep" in methods:
         n += (2 if duration > 25 else 0) + len(SPEEDS)
-    n += ("acoustid" in methods) + ("audd" in methods) * min(2, segs)
+    n += ("acoustid" in methods) + ("audiotag" in methods)
     return n
 
 
@@ -170,29 +170,28 @@ def identify_song(song_id: int, cancel: threading.Event | None = None) -> dict:
             if r and r.get("title"):
                 info = r
                 found_by = "AcoustID"
-    token = (s.get("identify.audd_token") or "").strip()
-    if not info and "audd" in methods and token and not _audd_off.is_set():
-        for start in pick_segments(y, SR, 2)[:2]:
-            stop_check()
-            tries += 1
-            try:
-                r = services.audd(y[int(start * SR): int((start + SEG) * SR)], SR, token)
-            except services.AudDError as e:
-                log.warning("%s", e)
-                errors += 1
-                if e.stop:
-                    _audd_off.set()
-                break
-            except Exception as e:
-                log.info("AudD failed for %s: %s", path.name, e)
-                errors += 1
-                continue
-            if r and r.get("title"):
-                info = r
-                found_by = "AudD"
-                if r.get("match_offset") is not None:
-                    info["clip_offset"] = max(0.0, r["match_offset"] - start)
-                break
+    atkey = (s.get("identify.audiotag_key") or "").strip()
+    if not info and "audiotag" in methods and atkey and not _audiotag_off.is_set():
+        start = pick_segments(y, SR, 1)[0]
+        stop_check()
+        tries += 1
+        try:
+            r = services.audiotag(y[int(start * SR): int((start + services.AUDIOTAG_SECONDS) * SR)], SR, atkey, cancel)
+        except InterruptedError:
+            raise
+        except services.AudioTagError as e:
+            log.warning("%s", e)
+            errors += 1
+            if e.stop:
+                _audiotag_off.set()
+            r = None
+        except Exception as e:
+            log.info("AudioTag failed for %s: %s", path.name, e)
+            errors += 1
+            r = None
+        if r and r.get("title"):
+            info = r
+            found_by = "AudioTag"
     if not info:
         # Every lookup failing (e.g. no internet) is an error to retry, not "not found".
         db.update_song(song_id, id_status="error" if tries and errors == tries else "not_found", id_methods=None)

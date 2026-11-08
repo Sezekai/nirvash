@@ -233,21 +233,29 @@ class SettingsPage(QScrollArea):
         l.addLayout(row)
         l.addWidget(label("AcoustID matches whole songs, so it rarely finds short clips. Get a free key: sign in at "
                           "acoustid.org and register an application.", "faint", wrap=True))
-        self._toggle_row(l, "AudD as a third backup (300 free lookups per account, then paid)", "identify.audd")
         row = QHBoxLayout()
-        row.addWidget(label("AudD token"))
-        tok = QLineEdit(self.s.get("identify.audd_token", ""))
-        tok.setPlaceholderText("From dashboard.audd.io")
-        tok.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        row.addWidget(label("AudioTag key"))
+        atk = QLineEdit(self.s.get("identify.audiotag_key", ""))
+        atk.setPlaceholderText("Optional third backup — free from audiotag.info")
+        atk.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.at_status = label("", "muted")
 
-        def save_tok():
-            self.s.set("identify.audd_token", tok.text().strip())
-            from ..jobs.identify import reset_audd
-            reset_audd()
+        def save_atk():
+            self.s.set("identify.audiotag_key", atk.text().strip())
+            from ..jobs.identify import reset_audiotag
+            reset_audiotag()
 
-        tok.editingFinished.connect(save_tok)
-        row.addWidget(tok, 1)
+        atk.editingFinished.connect(save_atk)
+        row.addWidget(atk, 1)
+        chk = button("Check", "refresh")
+        chk.setToolTip("Check the key works and how much free time is left this month")
+        chk.clicked.connect(lambda: (save_atk(), self._check_audiotag()))
+        row.addWidget(chk)
         l.addLayout(row)
+        l.addWidget(self.at_status)
+        l.addWidget(label("AudioTag gives 3 hours of audio a month free. Nirvash sends 15 s per song, so that's about "
+                          "700 songs a month. Get a key: sign up at audiotag.info, then API → API keys.", "faint",
+                          wrap=True))
         self._toggle_row(l, "Full length, genre and year from iTunes", "identify.itunes")
         self._toggle_row(l, "Genres from MusicBrainz", "identify.musicbrainz")
         self._toggle_row(l, "Lyrics from LRCLIB", "identify.lyrics")
@@ -261,6 +269,22 @@ class SettingsPage(QScrollArea):
         row.addStretch(1)
         l.addLayout(row)
         return c
+
+    def _check_audiotag(self) -> None:
+        key = (self.s.get("identify.audiotag_key") or "").strip()
+        if not key:
+            self.at_status.setText("Enter a key first.")
+            return
+        self.at_status.setText("Checking…")
+        from ..lookup import services
+
+        def done(st):
+            secs = int(st.get("identification_free_sec_remainder") or 0)
+            self.at_status.setText(f"Key works. Free time left: {secs // 60} min {secs % 60} s "
+                                   f"(about {secs // 15} songs). Lookups so far: {st.get('queries_count', 0)}.")
+
+        workers.run_bg(services.audiotag_stat, key, done=done,
+                       failed=lambda msg: self.at_status.setText(f"Couldn't check: {msg}"))
 
     def _retry(self, status: str) -> None:
         n = get_db().x("UPDATE songs SET id_status='pending' WHERE id_status=?", (status,))
