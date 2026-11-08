@@ -231,6 +231,23 @@ class SettingsPage(QScrollArea):
         key.editingFinished.connect(lambda: self.s.set("identify.acoustid_key", key.text().strip()))
         row.addWidget(key, 1)
         l.addLayout(row)
+        l.addWidget(label("AcoustID matches whole songs, so it rarely finds short clips. Get a free key: sign in at "
+                          "acoustid.org and register an application.", "faint", wrap=True))
+        self._toggle_row(l, "AudD as a third backup (300 free lookups per account, then paid)", "identify.audd")
+        row = QHBoxLayout()
+        row.addWidget(label("AudD token"))
+        tok = QLineEdit(self.s.get("identify.audd_token", ""))
+        tok.setPlaceholderText("From dashboard.audd.io")
+        tok.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+
+        def save_tok():
+            self.s.set("identify.audd_token", tok.text().strip())
+            from ..jobs.identify import reset_audd
+            reset_audd()
+
+        tok.editingFinished.connect(save_tok)
+        row.addWidget(tok, 1)
+        l.addLayout(row)
         self._toggle_row(l, "Full length, genre and year from iTunes", "identify.itunes")
         self._toggle_row(l, "Genres from MusicBrainz", "identify.musicbrainz")
         self._toggle_row(l, "Lyrics from LRCLIB", "identify.lyrics")

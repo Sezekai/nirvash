@@ -45,7 +45,7 @@ class Section:
 @dataclass
 class VideoResult:
     path: str
-    status: str            # music | partial | speech | silent | no_audio | skipped | ignored | error
+    status: str            # music | partial | speech | silent | no_audio | skipped | ignored | in_library | error
     detail: str = ""
     sections: list[Section] = field(default_factory=list)
     added: list[int] = field(default_factory=list)
@@ -61,6 +61,7 @@ STATUS_TEXT = {
     "no_audio": "No audio track",
     "skipped": "Already scanned",
     "ignored": "Skipped (you deleted its songs)",
+    "in_library": "Skipped (its songs are in the library)",
     "error": "Error",
 }
 
@@ -324,13 +325,25 @@ def add_or_merge(video: str, sec: Section, file: Path, sec_probs: np.ndarray, ta
     ctx.event("song_added", sid)
 
 
-def scan_video(path: Path, ctx: JobContext, ignored: set[str] | None = None) -> VideoResult:
+def skip_reason(path: Path, size: int, skip: dict | set | None) -> str | None:
+    """'ignored' (you deleted its songs) or 'in_library' (its songs are in the library), else None."""
+    if not skip:
+        return None
+    if isinstance(skip, set):                       # just paths of videos to ignore
+        return "ignored" if str(path).lower() in skip else None
+    return skip["paths"].get(str(path).lower()) or skip["named"].get((path.name.lower(), size))
+
+
+def scan_video(path: Path, ctx: JobContext, skip: dict | set | None = None) -> VideoResult:
+    """skip: get_db().skip_lists(). Videos you deleted songs from, and videos whose songs are in the library,
+    are never processed again (even with "re-check" on, or after the folder is moved)."""
     s = get_settings()
     db = get_db()
     vp = str(path)
     st = path.stat()
-    if ignored is not None and vp.lower() in ignored:
-        return VideoResult(vp, "ignored")
+    why = skip_reason(path, st.st_size, skip)
+    if why:
+        return VideoResult(vp, why)
     prev = db.scanned(vp)
     if prev and not s.get("scan.rescan") and prev["size"] == st.st_size and abs((prev["mtime"] or 0) - st.st_mtime) < 1e-3:
         return VideoResult(vp, "skipped", STATUS_TEXT.get(prev["result"], prev["result"]))
@@ -390,12 +403,12 @@ def scan_folders(ctx: JobContext, folders: list[str]) -> list[VideoResult]:
     songs_dir = str(s.folder("songs")).lower()
     videos = [v for v in videos if not str(v).lower().startswith(songs_dir)]
     ctx.event("total", len(videos))
-    ignored = get_db().ignored_videos()
+    skip = get_db().skip_lists()
     results = []
     for i, v in enumerate(videos):
         ctx.check()
         ctx.progress(i / max(1, len(videos)), v.name)
-        r = scan_video(v, ctx, ignored)
+        r = scan_video(v, ctx, skip)
         results.append(r)
         ctx.event("video_done", r)
     ctx.progress(1.0, "Done")

@@ -432,6 +432,102 @@ class EditInfoDialog(QDialog):
         return {k: (e.text().strip() or None) for k, e in self.fields.items()}
 
 
+class LookupDialog(QDialog):
+    """Pick which services to look songs up with this time."""
+
+    def __init__(self, durations: list[float], parent=None):
+        super().__init__(parent)
+        from ..jobs.identify import lookup_count
+        self._count = lookup_count
+        self.durs = durations
+        self.s = get_settings()
+        n = len(durations)
+        self.setWindowTitle("Look up again")
+        self.setMinimumWidth(520)
+        lay = QVBoxLayout(self)
+        lay.setSpacing(8)
+        lay.addWidget(label(f"Look up {n} song{'s' if n != 1 else ''} again with:", "h2"))
+        self.boxes: dict[str, QCheckBox] = {}
+
+        def add(key, text, hint, checked):
+            b = QCheckBox(text)
+            b.setChecked(checked)
+            b.toggled.connect(self._update)
+            lay.addWidget(b)
+            if hint:
+                h = label(hint, "faint", wrap=True)
+                h.setContentsMargins(26, 0, 0, 4)
+                lay.addWidget(h)
+            self.boxes[key] = b
+            return b
+
+        add("shazam", "Shazam", "Free, about 18 lookups a minute. Tries 3 parts of each song.", True)
+        add("deep", "Shazam, trying harder",
+            "Tries more parts of each song, then sped-up and slowed-down versions of it - edits often change "
+            "the speed, which stops Shazam matching. Free, but up to about 3× as many lookups.", False)
+        self.key = QLineEdit(self.s.get("identify.acoustid_key", ""))
+        self.key.setPlaceholderText("AcoustID key - free from acoustid.org")
+        add("acoustid", "AcoustID", "Free. Matches whole songs, so it rarely finds short clips.", False)
+        self.key.setContentsMargins(26, 0, 0, 0)
+        lay.addWidget(self.key)
+        self.tok = QLineEdit(self.s.get("identify.audd_token", ""))
+        self.tok.setPlaceholderText("AudD token - from dashboard.audd.io")
+        self.tok.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        add("audd", "AudD", "300 free lookups per account, then paid ($5 per 1,000). Up to 2 per song.", False)
+        lay.addWidget(self.tok)
+        self.key.textChanged.connect(self._update)
+        self.tok.textChanged.connect(self._update)
+        self.est = label("", "muted", wrap=True)
+        lay.addWidget(self.est)
+        bb = QDialogButtonBox()
+        self.ok = bb.addButton("Look up", QDialogButtonBox.AcceptRole)
+        self.ok.setObjectName("primary")
+        bb.addButton(QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self._update()
+
+    def methods(self) -> list[str]:
+        out = [k for k, b in self.boxes.items() if b.isChecked()]
+        if "deep" in out and "shazam" in out:
+            out.remove("shazam")          # trying harder includes the normal tries
+        return out
+
+    def _update(self) -> None:
+        self.key.setVisible(self.boxes["acoustid"].isChecked())
+        self.tok.setVisible(self.boxes["audd"].isChecked())
+        m = self.methods()
+        missing = ("acoustid" in m and not self.key.text().strip()) or ("audd" in m and not self.tok.text().strip())
+        self.ok.setEnabled(bool(m) and not missing)
+        if not m:
+            self.est.setText("Pick at least one.")
+            return
+        if missing:
+            self.est.setText("Enter the key / token above first.")
+            return
+        sh = [x for x in m if x in ("shazam", "deep")]
+        n_sh = sum(self._count(sh, d) for d in self.durs) if sh else 0
+        n_all = sum(self._count(m, d) for d in self.durs)
+        txt = f"Up to {n_all:,} lookups"
+        if n_sh:
+            mins = n_sh / 18
+            txt += (f" - at most about {mins / 60:.1f} hours" if mins >= 90 else f" - at most about {max(1, round(mins))} min")
+            txt += " at Shazam's limit. It stops early for each song as soon as one finds it."
+        if "audd" in m:
+            txt += f" Uses up to {2 * len(self.durs):,} AudD lookups."
+        self.est.setText(txt)
+
+    def _accept(self) -> None:
+        if self.boxes["acoustid"].isChecked():
+            self.s.set("identify.acoustid_key", self.key.text().strip())
+        if self.boxes["audd"].isChecked():
+            self.s.set("identify.audd_token", self.tok.text().strip())
+            from ..jobs.identify import reset_audd
+            reset_audd()
+        self.accept()
+
+
 class DeleteDialog(QDialog):
     def __init__(self, text: str, n_videos: int, parent=None):
         super().__init__(parent)
@@ -715,7 +811,7 @@ class LibraryPage(QWidget):
         head.addWidget(self.count_lbl)
         head.addStretch(1)
         self.lookup_btn = button("Look up unidentified", "refresh")
-        self.lookup_btn.setToolTip("Ask Shazam / AcoustID again about every song that wasn't identified")
+        self.lookup_btn.setToolTip("Look up every song that wasn't identified again - pick Shazam, AcoustID or AudD")
         self.lookup_btn.clicked.connect(self.lookup_unidentified)
         head.addWidget(self.lookup_btn)
         self.sel_btn = QToolButton()
@@ -1235,6 +1331,13 @@ class LibraryPage(QWidget):
         self.table.viewport().update()
         self.detail.update_play()
 
+    def open_file(self, path: str) -> None:
+        """Open the song in whatever Windows plays it with (like double-clicking it in Explorer)."""
+        if self.playing_sid is not None and self.player.is_playing():
+            self.player.pause()
+        if not open_with_default(path):
+            hub.toast.emit("That song's file is missing.", "warn")
+
     def open_video(self, path: str) -> None:
         if not open_with_default(path):
             hub.toast.emit("That video isn't there any more.", "warn")
@@ -1259,7 +1362,7 @@ class LibraryPage(QWidget):
                     lambda: self.set_approved(ids, not all_ok))
         m.addAction(icon("check", C["teal"]), "Sounds fine — mark checked", lambda: self.mark_checked(ids))
         m.addAction(icon("tag"), "Categories…", lambda: self.category_menu(ids))
-        m.addAction(icon("refresh"), "Look up again", lambda: self.reidentify(ids))
+        m.addAction(icon("refresh"), "Look up again…", lambda: self.lookup(ids))
         m.addSeparator()
         n_id = sum(1 for r in rows if r["title"])
         a = m.addAction(icon("edit"), f"Rename to song title & tag file{s}" + (f" ({n_id})" if n > 1 else ""),
@@ -1271,6 +1374,8 @@ class LibraryPage(QWidget):
         if n == 1 and rows:
             r = rows[0]
             m.addAction(icon("edit"), "Edit info…", lambda: self.edit_info(ids[0]))
+            m.addAction(icon("play", C["teal"]), "Open in your music player",
+                        lambda p=r["file_path"]: self.open_file(p))
             m.addAction(icon("folder"), "Show file", lambda p=r["file_path"]: open_in_explorer(p))
             srcs = db.sources(ids[0])
             if srcs:
@@ -1305,20 +1410,45 @@ class LibraryPage(QWidget):
             get_db().update_song(i, checked=1, approved=1)
             hub.songChanged.emit(i)
 
-    def reidentify(self, ids: list[int]) -> None:
-        for i in ids:
-            get_db().update_song(i, id_status="pending")
-            hub.songChanged.emit(i)
+    def reidentify(self, ids: list[int], methods: list[str] | None = None) -> None:
+        """Queue songs for another lookup. methods: one-off choice of services (None = the usual ones)."""
+        ids = [i for i in ids if i is not None]
+        db = get_db()
+        val = ",".join(methods) if methods else None
+        for k in range(0, len(ids), 400):
+            chunk = ids[k:k + 400]
+            db.x(f"UPDATE songs SET id_status='pending', id_methods=? WHERE id IN ({','.join('?' * len(chunk))})",
+                 (val, *chunk))
+        if len(ids) > 50:
+            hub.songsReset.emit()
+        else:
+            for i in ids:
+                hub.songChanged.emit(i)
         w = self.window()
         if hasattr(w, "identify"):
             w.identify.poke()
 
-    def lookup_unidentified(self) -> None:
-        ids = [r["id"] for r in self.model.rows if not r["identified"] and r["status"] in ("not_found", "error")]
+    def ask_lookup(self, ids: list[int]) -> list[str] | None:
+        """Which services to use, or None if cancelled. Tests replace this."""
+        db = get_db()
+        durs = [r["duration"] or 0 for r in (db.song(i) for i in ids) if r is not None]
+        d = LookupDialog(durs, self)
+        return d.methods() if d.exec() else None
+
+    def lookup(self, ids: list[int]) -> None:
+        ids = [i for i in ids if i is not None]
         if not ids:
             return
-        self.reidentify(ids)
-        hub.toast.emit(f"Looking up {len(ids)} song{'s' if len(ids) != 1 else ''} again in the background.", "ok")
+        methods = self.ask_lookup(ids)
+        if not methods:
+            return
+        self.reidentify(ids, methods)
+        names = {"shazam": "Shazam", "deep": "Shazam (trying harder)", "acoustid": "AcoustID", "audd": "AudD"}
+        hub.toast.emit(f"Looking up {len(ids)} song{'s' if len(ids) != 1 else ''} with "
+                       f"{' + '.join(names[m] for m in methods)} in the background.", "ok")
+
+    def lookup_unidentified(self) -> None:
+        self.lookup([r["id"] for r in self.model.rows if not r["identified"] and r["status"] in ("not_found", "error")])
 
     def edit_info(self, sid: int) -> None:
         r = get_db().song(sid)

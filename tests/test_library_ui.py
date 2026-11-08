@@ -133,9 +133,25 @@ def test_library_controls(app, tmp_path):
 
     # Look up the unidentified ones again (not_found + error), not the identified ones.
     assert "(3)" in lib.lookup_btn.text()
+    from nirvash.ui.library_page import LookupDialog
+    d = LookupDialog([4, 30, 200], lib)
+    d.boxes["acoustid"].setChecked(True)
+    d.key.setText("")
+    assert not d.ok.isEnabled()                       # AcoustID needs a key first
+    d.boxes["acoustid"].setChecked(False)
+    d.boxes["deep"].setChecked(True)
+    assert d.methods() == ["deep"] and d.ok.isEnabled() and "lookups" in d.est.text()
+    d.deleteLater()
+    lib.ask_lookup = lambda ids_: ["shazam"]
     lib.lookup_unidentified()
     st = {k: get_db().song(v)["id_status"] for k, v in ids.items()}
     assert st == {"a": "found", "b": "pending", "c": "found", "d": "pending", "e": "pending"}
+    assert get_db().song(ids["b"])["id_methods"] == "shazam" and get_db().song(ids["a"])["id_methods"] is None
+    opened_songs = []
+    import nirvash.ui.library_page as lp_
+    lp_.open_with_default = lambda p: (opened_songs.append(p), True)[1]
+    lib.open_file(get_db().song(ids["a"])["file_path"])
+    assert opened_songs
 
     # Rename & tag the two copies of "Sunny" (playing one is let go first).
     w.identify.stop()

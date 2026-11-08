@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -74,13 +75,19 @@ MIGRATIONS = [
     ("approved", "INTEGER NOT NULL DEFAULT 0"),
     ("unlinked", "INTEGER NOT NULL DEFAULT 0"),      # video links removed - never re-linked by scans
     ("tagged", "INTEGER NOT NULL DEFAULT 0"),        # file renamed and tagged with the song info
+    ("id_methods", "TEXT"),                          # one-off lookup services for the next try, e.g. "shazam"
+]
+# Columns added to other tables: (table, name, definition)
+TABLE_MIGRATIONS = [
+    ("ignored_videos", "name", "TEXT"),   # file name + size still match after the folder is moved or renamed
+    ("ignored_videos", "size", "INTEGER"),
 ]
 
 SONG_FIELDS = (
     "file_path codec ext sample_rate channels bitrate duration title artist album genre year "
     "cover_url shazam_key isrc mbid full_length clip_offset lyrics_plain lyrics_synced bpm energy "
     "pace mood partial checked favourite id_status id_source manual_info added_at "
-    "played listen_count last_played approved unlinked tagged"
+    "played listen_count last_played approved unlinked tagged id_methods"
 ).split()
 
 
@@ -103,6 +110,9 @@ class DB:
             for name, decl in MIGRATIONS:
                 if name not in have:
                     c.execute(f"ALTER TABLE songs ADD COLUMN {name} {decl}")
+            for table, name, decl in TABLE_MIGRATIONS:
+                if name not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     def conn(self) -> sqlite3.Connection:
         c = getattr(self._local, "c", None)
@@ -205,10 +215,34 @@ class DB:
 
     # ---- things the user deleted: never brought back by a scan ---------------
     def ignore_video(self, path: str) -> None:
-        self.x("INSERT OR IGNORE INTO ignored_videos(path, added_at) VALUES(?,?)", (path, time.time()))
+        size = None
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            r = self.scanned(path)
+            size = r["size"] if r is not None else None
+        self.x("INSERT INTO ignored_videos(path, added_at, name, size) VALUES(?,?,?,?) "
+               "ON CONFLICT(path) DO UPDATE SET name=excluded.name, size=COALESCE(excluded.size, size)",
+               (path, time.time(), os.path.basename(path).lower(), size))
 
     def ignored_videos(self) -> set[str]:
         return {r[0].lower() for r in self.q("SELECT path FROM ignored_videos")}
+
+    def skip_lists(self) -> dict:
+        """Videos scans must never process again, by path and by (file name, size) so moved folders still match:
+        'ignored' - you deleted songs from them; 'in_library' - songs from them are in the library."""
+        paths: dict[str, str] = {}
+        named: dict[tuple[str, int], str] = {}
+        for r in self.q("SELECT path, name, size FROM ignored_videos"):
+            paths[r["path"].lower()] = "ignored"
+            if r["size"] is not None:
+                named[((r["name"] or os.path.basename(r["path"])).lower(), int(r["size"]))] = "ignored"
+        for r in self.q("SELECT DISTINCT s.video_path, v.size FROM song_sources s "
+                        "LEFT JOIN scanned_videos v ON v.path = s.video_path"):
+            paths.setdefault(r["video_path"].lower(), "in_library")
+            if r["size"] is not None:
+                named.setdefault((os.path.basename(r["video_path"]).lower(), int(r["size"])), "in_library")
+        return {"paths": paths, "named": named}
 
     def ignore_song(self, fp: bytes, duration: float) -> None:
         self.x("INSERT INTO ignored_songs(fingerprint, duration, added_at) VALUES(?,?,?)", (fp, duration, time.time()))

@@ -1,4 +1,4 @@
-"""Online song lookups: Shazam, AcoustID + MusicBrainz, iTunes, LRCLIB."""
+"""Online song lookups: Shazam, AcoustID + MusicBrainz, AudD, iTunes, LRCLIB."""
 from __future__ import annotations
 
 import asyncio
@@ -46,6 +46,7 @@ class RateLimiter:
 SHAZAM_LIMIT = RateLimiter(18, 60.0)   # Shazam allows about 20 a minute
 MB_LIMIT = RateLimiter(1, 1.1)         # MusicBrainz: 1 request per second
 ITUNES_LIMIT = RateLimiter(18, 60.0)
+AUDD_LIMIT = RateLimiter(20, 60.0)
 
 
 def wav_bytes(y: np.ndarray, sr: int) -> bytes:
@@ -118,6 +119,61 @@ def shazam(y: np.ndarray, sr: int, cancel: threading.Event | None = None) -> dic
             info["match_offset"] = float(matches[0].get("offset") or 0)
         except Exception:
             pass
+    return info
+
+
+# ---- AudD (optional, needs your own token: 300 free lookups, then paid) ------
+class AudDError(RuntimeError):
+    def __init__(self, msg: str, code: int | None = None):
+        super().__init__(msg)
+        self.code = code
+
+    @property
+    def stop(self) -> bool:
+        """Errors that will happen for every song (bad token, no lookups left): stop using AudD this run."""
+        return self.code in (900, 901, 902, 903, 904)
+
+
+def _mmss(t: str | None) -> float | None:
+    try:
+        parts = [float(x) for x in (t or "").split(":")]
+    except ValueError:
+        return None
+    v = 0.0
+    for x in parts:
+        v = v * 60 + x
+    return v if parts else None
+
+
+def audd(y: np.ndarray, sr: int, token: str) -> dict | None:
+    """Recognise about 12 s of audio with AudD (https://audd.io)."""
+    AUDD_LIMIT.wait()
+    r = _http.post("https://api.audd.io/", data={"api_token": token, "return": "apple_music"},
+                   files={"file": ("clip.wav", wav_bytes(y, sr), "audio/wav")}, timeout=60)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("status") == "error":
+        err = data.get("error") or {}
+        raise AudDError(f"AudD: {err.get('error_message', 'error')}", err.get("error_code"))
+    res = data.get("result")
+    if not res or not res.get("title"):
+        return None
+    info: dict = {"title": res.get("title"), "artist": res.get("artist"), "album": res.get("album")}
+    if res.get("release_date"):
+        info["year"] = str(res["release_date"])[:4]
+    am = res.get("apple_music") or {}
+    if am.get("durationInMillis"):
+        info["full_length"] = am["durationInMillis"] / 1000.0
+    if am.get("genreNames"):
+        info["genre"] = am["genreNames"][0]
+    if am.get("isrc"):
+        info["isrc"] = am["isrc"]
+    art = (am.get("artwork") or {}).get("url")
+    if art:
+        info["cover_url"] = art.replace("{w}", "600").replace("{h}", "600")
+    off = _mmss(res.get("timecode"))
+    if off is not None:
+        info["match_offset"] = off
     return info
 
 

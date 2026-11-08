@@ -164,13 +164,19 @@ def test_scan_skips_deleted_and_never_relinks(env, monkeypatch):
     db = get_db()
     ctx = JobContext()
     for v in ("V1.mp4", "V2.mp4"):
-        assert scan.scan_video(src / v, ctx, db.ignored_videos()).status == "music"
+        assert scan.scan_video(src / v, ctx, db.skip_lists()).status == "music"
     s1 = next(r for r in db.songs() if "V1" in r["file_path"])
     s2 = next(r for r in db.songs() if "V2" in r["file_path"])
 
+    # A video whose song is in the library is never processed again, even with "re-check" on.
+    from nirvash.core.settings import get_settings
+    get_settings().set("scan.rescan", True)
+    assert scan.scan_video(src / "V1.mp4", ctx, db.skip_lists()).status == "in_library"
+    get_settings().set("scan.rescan", False)
+
     # Song 1: unlink. Its duplicate in V3 must not link it again.
     file_ops.unlink_videos(s1["id"])
-    r3 = scan.scan_video(src / "V3.mp4", ctx, db.ignored_videos())
+    r3 = scan.scan_video(src / "V3.mp4", ctx, db.skip_lists())
     assert r3.merged == [s1["id"]] and not db.sources(s1["id"]), (r3, list(map(dict, db.sources(s1["id"]))))
 
     # Song 2: delete, skipping its video and the song itself.
@@ -181,7 +187,71 @@ def test_scan_skips_deleted_and_never_relinks(env, monkeypatch):
     db.delete_song(s2["id"])
     scan.reset_ignored_index()
     get_db().x("DELETE FROM scanned_videos")
-    assert scan.scan_video(src / "V2.mp4", ctx, db.ignored_videos()).status == "ignored"
-    r4 = scan.scan_video(src / "V4.mp4", ctx, db.ignored_videos())
+    assert scan.scan_video(src / "V2.mp4", ctx, db.skip_lists()).status == "ignored"
+    # ...also after the folder is moved (matched by file name and size).
+    import shutil
+    moved = env / "moved"
+    moved.mkdir()
+    shutil.copy2(src / "V2.mp4", moved / "V2.mp4")
+    assert scan.scan_video(moved / "V2.mp4", ctx, db.skip_lists()).status == "ignored"
+    r4 = scan.scan_video(src / "V4.mp4", ctx, db.skip_lists())
     assert r4.dropped == 1 and not r4.added, r4
     assert len(db.songs()) == 1
+
+
+def test_identify_methods(env, monkeypatch):
+    """One-off service choices, trying harder with speed changes, AudD as a backup."""
+    import numpy as np
+
+    from nirvash.core.db import get_db
+    from nirvash.core.settings import get_settings
+    from nirvash.jobs import identify
+    from nirvash.lookup import services
+
+    db = get_db()
+    lib = get_settings().folder("songs")
+    p = lib / "clip.wav"
+    sh("ffmpeg", "-y", "-f", "lavfi", "-i", "sine=f=330:d=40", str(p))
+    sid = db.add_song(file_path=str(p), duration=40, id_status="pending")
+    calls = []
+
+    def fake_shazam(y, sr, cancel=None):
+        calls.append(("shazam", round(len(y) / sr, 1)))
+        # Only the version slowed back down to 0.8x speed (a 1.25x sped-up edit) matches.
+        return {"title": "Song", "artist": "A"} if abs(len(y) / sr - 12.0) < 0.2 and len(calls) > 5 else None
+
+    monkeypatch.setattr(services, "shazam", fake_shazam)
+    monkeypatch.setattr(services, "itunes", lambda *a: None)
+    monkeypatch.setattr(services, "musicbrainz", lambda *a: None)
+    monkeypatch.setattr(services, "lrclib", lambda *a: None)
+    monkeypatch.setattr(services, "audd", lambda *a: calls.append(("audd",)) or None)
+    monkeypatch.setattr(services, "acoustid", lambda *a: calls.append(("acoustid",)) or None)
+    s = get_settings()
+    s.set("identify.acoustid_key", "k")
+    s.set("identify.audd", True)
+    s.set("identify.audd_token", "t")
+
+    # AcoustID only: Shazam and AudD aren't touched, and the one-off choice is cleared afterwards.
+    db.update_song(sid, id_methods="acoustid")
+    identify.identify_song(sid)
+    assert [c[0] for c in calls] == ["acoustid"] and db.song(sid)["id_methods"] is None
+    assert db.song(sid)["id_status"] == "not_found"
+
+    # Usual order: Shazam (3 parts), AcoustID, then AudD (2 parts).
+    calls.clear()
+    identify.identify_song(sid)
+    assert [c[0] for c in calls] == ["shazam"] * 3 + ["acoustid", "audd", "audd"], calls
+
+    # Trying harder: 5 parts, then speed changes, until one matches.
+    calls.clear()
+    db.update_song(sid, id_methods="deep")
+    up = identify.identify_song(sid)
+    r = db.song(sid)
+    assert r["id_status"] == "found" and r["title"] == "Song", calls
+    assert "speed" in r["id_source"] and r["id_methods"] is None
+    assert len(calls) == 6, calls
+
+    # respeed keeps 12 s of output for any speed
+    y = np.zeros(16000 * 40, np.float32)
+    for sp in identify.SPEEDS:
+        assert abs(len(identify.respeed(y, 16000, 5, sp)) / 16000 - 12) < 0.01

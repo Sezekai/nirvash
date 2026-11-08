@@ -18,7 +18,7 @@ from .theme import C, icon
 from .widgets import TaskProgress, Toggle, button, card, label, open_in_explorer, tool
 
 RESULT_COLOURS = {"music": C["teal"], "partial": C["pink"], "speech": C["muted"], "silent": C["faint"],
-                  "no_audio": C["faint"], "skipped": C["faint"], "ignored": C["faint"],
+                  "no_audio": C["faint"], "skipped": C["faint"], "ignored": C["faint"], "in_library": C["faint"],
                   "error": C["red"]}
 
 
@@ -94,7 +94,11 @@ class ScanPage(QWidget):
         self.t_re = Toggle(bool(self.s.get("scan.rescan", False)))
         self.t_re.toggledOn.connect(lambda v: self.s.set("scan.rescan", v))
         opts.addWidget(self.t_re)
-        opts.addWidget(label("Re-check videos already scanned"))
+        rl_ = label("Re-check scanned videos that gave no songs")
+        rl_.setToolTip("Videos whose songs are in your library, and videos you deleted songs from, are always "
+                       "skipped - even if the folder was moved.")
+        self.t_re.setToolTip(rl_.toolTip())
+        opts.addWidget(rl_)
         opts.addStretch(1)
         fl.addLayout(opts)
         top.addWidget(fc, 3)

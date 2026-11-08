@@ -43,6 +43,8 @@ DEFAULTS: dict[str, Any] = {
     "identify": {
         "shazam": True,
         "acoustid_key": "",
+        "audd": False,              # third backup; costs lookups from your AudD account
+        "audd_token": "",
         "musicbrainz": True,
         "itunes": True,
         "lyrics": True,

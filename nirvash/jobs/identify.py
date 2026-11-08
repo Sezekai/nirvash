@@ -1,4 +1,4 @@
-"""Background song identification: Shazam first, AcoustID as backup, then extra info and lyrics."""
+"""Background song identification: Shazam first, AcoustID and AudD as backups, then extra info and lyrics."""
 from __future__ import annotations
 
 import threading
@@ -49,6 +49,54 @@ def _merge(dst: dict, src: dict | None, keys: tuple[str, ...], overwrite: bool =
             dst[k] = v
 
 
+METHODS = ("shazam", "deep", "acoustid", "audd")
+# Speeds to play a clip at when it may be a sped-up or slowed-down edit: 0.8 undoes a 1.25x speed-up.
+SPEEDS = (0.8, 0.87, 0.92, 1.1, 1.2)
+_audd_off = threading.Event()          # set when AudD says the token is bad or out of lookups
+
+
+def reset_audd() -> None:
+    """Try AudD again (after a new token or more lookups were bought)."""
+    _audd_off.clear()
+
+
+def respeed(y: np.ndarray, sr: int, start: float, speed: float, seconds: float = SEG) -> np.ndarray | None:
+    """`seconds` of audio from `start`, played at `speed` (pitch moves too, like a sped-up edit)."""
+    n_in = int(seconds * speed * sr)
+    seg = y[int(start * sr): int(start * sr) + n_in]
+    if len(seg) < 4 * sr:
+        return None
+    n_out = int(len(seg) / speed)
+    return np.interp(np.linspace(0, len(seg) - 1, n_out), np.arange(len(seg)), seg).astype(np.float32)
+
+
+def methods_for(row, s) -> list[str]:
+    """Lookups to try, in order. A song can carry a one-off choice (id_methods), e.g. "Shazam only"."""
+    chosen = (row["id_methods"] or "").split(",") if row["id_methods"] else None
+    if chosen:
+        return [m for m in METHODS if m in chosen]
+    out = []
+    if s.get("identify.shazam", True):
+        out.append("shazam")
+    if (s.get("identify.acoustid_key") or "").strip():
+        out.append("acoustid")
+    if s.get("identify.audd", False) and (s.get("identify.audd_token") or "").strip():
+        out.append("audd")
+    return out
+
+
+def lookup_count(methods: list[str], duration: float) -> int:
+    """Most lookups a song can take with these methods (for time estimates)."""
+    n = 0
+    segs = 1 if duration <= SEG + 1 else 3
+    if "shazam" in methods or "deep" in methods:
+        n += segs
+    if "deep" in methods:
+        n += (2 if duration > 25 else 0) + len(SPEEDS)
+    n += ("acoustid" in methods) + ("audd" in methods) * min(2, segs)
+    return n
+
+
 def identify_song(song_id: int, cancel: threading.Event | None = None) -> dict:
     db = get_db()
     s = get_settings()
@@ -56,38 +104,60 @@ def identify_song(song_id: int, cancel: threading.Event | None = None) -> dict:
     if row is None:
         return {}
     path = Path(row["file_path"])
-    upd: dict[str, Any] = {}
+    methods = methods_for(row, s)
+    upd: dict[str, Any] = {"id_methods": None}
     found_by = None
     try:
         y = ff.decode_audio(path, SR)
     except Exception as e:
-        db.update_song(song_id, id_status="error")
+        db.update_song(song_id, id_status="error", id_methods=None)
         log.warning("could not read %s: %s", path, e)
         return {}
     info: dict[str, Any] = {}
     tries = errors = 0
-    if s.get("identify.shazam", True):
-        for start in pick_segments(y, SR):
-            tries += 1
-            if cancel is not None and cancel.is_set():
-                raise InterruptedError()
-            seg = y[int(start * SR): int((start + SEG) * SR)]
-            try:
-                r = services.shazam(seg, SR, cancel)
-            except InterruptedError:
-                raise
-            except Exception as e:
-                log.info("Shazam failed for %s: %s", path.name, e)
-                errors += 1
-                r = None
-            if r and r.get("title"):
-                info = r
-                found_by = "Shazam"
-                if r.get("match_offset") is not None:
-                    info["clip_offset"] = max(0.0, r["match_offset"] - start)
+
+    def stop_check():
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError()
+
+    def try_shazam(seg, start: float | None, how: str) -> bool:
+        nonlocal tries, errors, info, found_by
+        stop_check()
+        tries += 1
+        try:
+            r = services.shazam(seg, SR, cancel)
+        except InterruptedError:
+            raise
+        except Exception as e:
+            log.info("Shazam failed for %s: %s", path.name, e)
+            errors += 1
+            return False
+        if r and r.get("title"):
+            info = r
+            found_by = how
+            if start is not None and r.get("match_offset") is not None:
+                info["clip_offset"] = max(0.0, r["match_offset"] - start)
+            return True
+        return False
+
+    if "shazam" in methods or "deep" in methods:
+        n = 5 if "deep" in methods else 3
+        starts = pick_segments(y, SR, n)
+        for start in starts:
+            if try_shazam(y[int(start * SR): int((start + SEG) * SR)], start, "Shazam"):
                 break
+        if not info and "deep" in methods:
+            # Edits are often sped up or slowed down, which Shazam can't match: undo common speeds.
+            for start in starts[:1]:
+                for sp in SPEEDS:
+                    seg = respeed(y, SR, start, sp)
+                    if seg is not None and try_shazam(seg, None, f"Shazam (clip is {1 / sp:.2f}× the song's speed)"):
+                        break
+                if info:
+                    break
     key = (s.get("identify.acoustid_key") or "").strip()
-    if not info and key:
+    if not info and "acoustid" in methods and key:
+        stop_check()
         fpc = fingerprint_compressed(str(path))
         if fpc:
             tries += 1
@@ -100,9 +170,32 @@ def identify_song(song_id: int, cancel: threading.Event | None = None) -> dict:
             if r and r.get("title"):
                 info = r
                 found_by = "AcoustID"
+    token = (s.get("identify.audd_token") or "").strip()
+    if not info and "audd" in methods and token and not _audd_off.is_set():
+        for start in pick_segments(y, SR, 2)[:2]:
+            stop_check()
+            tries += 1
+            try:
+                r = services.audd(y[int(start * SR): int((start + SEG) * SR)], SR, token)
+            except services.AudDError as e:
+                log.warning("%s", e)
+                errors += 1
+                if e.stop:
+                    _audd_off.set()
+                break
+            except Exception as e:
+                log.info("AudD failed for %s: %s", path.name, e)
+                errors += 1
+                continue
+            if r and r.get("title"):
+                info = r
+                found_by = "AudD"
+                if r.get("match_offset") is not None:
+                    info["clip_offset"] = max(0.0, r["match_offset"] - start)
+                break
     if not info:
         # Every lookup failing (e.g. no internet) is an error to retry, not "not found".
-        db.update_song(song_id, id_status="error" if tries and errors == tries else "not_found")
+        db.update_song(song_id, id_status="error" if tries and errors == tries else "not_found", id_methods=None)
         return {}
     title, artist = info.get("title"), info.get("artist")
     if s.get("identify.itunes", True) and title:
