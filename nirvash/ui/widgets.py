@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLabel, QLayout, QPushButton,
                                QSizePolicy, QSlider, QToolButton, QVBoxLayout, QWidget)
@@ -51,6 +51,8 @@ class ElidedLabel(QLabel):
         self.setText(text)
 
     def setText(self, text: str) -> None:  # noqa: N802
+        if (text or "") == getattr(self, "_full", None):
+            return
         self._full = text or ""
         self.setToolTip(self._full if len(self._full) > 40 else "")
         self._elide()
@@ -62,9 +64,16 @@ class ElidedLabel(QLabel):
         super().resizeEvent(e)
         self._elide()
 
+    def changeEvent(self, e):  # noqa: N802 - a new font (Look screen) changes where the text needs cutting
+        super().changeEvent(e)
+        if e.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self._elide()
+
     def _elide(self) -> None:
         w = max(10, self.width())
-        super().setText(self.fontMetrics().elidedText(self._full, self._mode, w))
+        t = self.fontMetrics().elidedText(self._full, self._mode, w)
+        if t != super().text():
+            super().setText(t)
 
 
 class Segmented(QFrame):

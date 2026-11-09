@@ -21,6 +21,25 @@ from .widgets import ElidedLabel, button, fmt_dur, label
 STALL_S = 20
 
 
+def _style(w, css: str) -> None:
+    """setStyleSheet only when it changes: restyling re-polishes the widget, which is slow when done every tick."""
+    if w.property("_nv_css") != css:
+        w.setProperty("_nv_css", css)
+        w.setStyleSheet(css)
+
+
+def _icon(btn, name: str, colour: str, size: int) -> None:
+    key = f"{name}|{colour}|{size}"
+    if btn.property("_nv_icon") != key:
+        btn.setProperty("_nv_icon", key)
+        btn.setIcon(icon(name, colour, size))
+
+
+def _text(w, txt: str) -> None:
+    if w.text() != txt:
+        w.setText(txt)
+
+
 def times_text(el: float, frac: float) -> str:
     if frac >= 0.01 and el >= 3:
         return f"{fmt_dur(el)} elapsed · about {fmt_dur(el * (1 - frac) / frac)} left"
@@ -86,7 +105,7 @@ class Pill(QFrame):
 
     def set_state(self, state: str) -> None:
         col = {"run": C["acc"], "pause": C["warn"], "stall": C["warn"]}.get(state, C["acc"])
-        self.led.setStyleSheet(f"background:{col}; border-radius:3px;")
+        _style(self.led, f"background:{col}; border-radius:3px;")
 
     def mousePressEvent(self, e):
         self.clicked.emit()
@@ -106,7 +125,7 @@ class HwChip(QFrame):
         self.ring.setFixedSize(14, 14)
         lay.addWidget(self.ring)
         self.txt = QLabel()
-        self.txt.setStyleSheet("font-size: 11px;")
+        _style(self.txt, "font-size: 11px;")
         lay.addWidget(self.txt)
         self.stats: dict | None = None
         self._busy = False
@@ -140,19 +159,19 @@ class HwChip(QFrame):
         name, on_gpu = gpu.describe_device()
         if not name:
             self.txt.setText("Loading the AI model…")
-            self.txt.setStyleSheet(f"font-size: 11px; color: {C['sec']};")
-            self.ring.setStyleSheet(f"border: 2px solid {C['line2']}; border-radius: 7px;")
+            _style(self.txt, f"font-size: 11px; color: {C['sec']};")
+            _style(self.ring, f"border: 2px solid {C['line2']}; border-radius: 7px;")
             return
         if on_gpu:
             st = self.stats
             txt = name + (f" · {st['util']}% · {st['used']:.1f} / {st['total']:.1f} GB" if st else " · DirectML")
             self.txt.setText(txt)
-            self.txt.setStyleSheet(f"font-size: 11px; color: {C['sec']};")
-            self.ring.setStyleSheet(f"border: 2px solid {C['acc']}; border-radius: 7px;")
+            _style(self.txt, f"font-size: 11px; color: {C['sec']};")
+            _style(self.ring, f"border: 2px solid {C['acc']}; border-radius: 7px;")
         else:
             self.txt.setText(name)
-            self.txt.setStyleSheet(f"font-size: 11px; color: {C['warn']};")
-            self.ring.setStyleSheet(f"border: 2px solid {C['warn']}; border-radius: 7px;")
+            _style(self.txt, f"font-size: 11px; color: {C['warn']};")
+            _style(self.ring, f"border: 2px solid {C['warn']}; border-radius: 7px;")
 
 
 class StatusBar(QWidget):
@@ -180,7 +199,7 @@ class StatusBar(QWidget):
         self.bar.setTextVisible(False)
         lay.addWidget(self.bar)
         self.pct = label("", None)
-        self.pct.setStyleSheet("font-weight: 600;")
+        _style(self.pct, "font-weight: 600;")
         self.pct.setMinimumWidth(34)
         lay.addWidget(self.pct)
         self.times = ElidedLabel("")
@@ -214,15 +233,18 @@ class StatusBar(QWidget):
         self.timer = QTimer(self, interval=1000, timeout=self.refresh)
         self.timer.start()
         self.anim = QTimer(self, interval=60, timeout=self._animate)
+        # many updates a second are folded into one repaint
+        self._soon = QTimer(self, singleShot=True, interval=80, timeout=self.refresh)
         queue.changed.connect(self.refresh)
-        queue.progressed.connect(self.refresh)
+        queue.progressed.connect(self._soon.start)
         queue.finishedJob.connect(lambda _qj: self.refresh())
         self.refresh()
 
     # ---- identification state (from IdentifyQueue via the hub) -------------------
     def set_identify(self, st: dict) -> None:
         self.id_state = dict(st)
-        self.refresh()
+        if not self._soon.isActive():
+            self._soon.start()
 
     def _id_active(self) -> bool:
         st = self.id_state
@@ -269,7 +291,7 @@ class StatusBar(QWidget):
             stalled = (now - qj.last_change) > STALL_S and not qj.paused
             self.name.setText(qj.name)
             self.detail.setText(qj.detail or "Starting…")
-            self.detail.setStyleSheet(f"color: {C['sec']};")
+            _style(self.detail, f"color: {C['sec']};")
             self.bar.setVisible(True)
             self.pct.setVisible(True)
             sliding = not qj.sized and qj.frac <= 0
@@ -289,16 +311,17 @@ class StatusBar(QWidget):
             else:
                 tt, col = (times_text(el, qj.frac) if not sliding else f"{fmt_dur(el)} elapsed · size not known yet"), C["sec"]
             self.times.setText(tt)
-            self.times.setStyleSheet(f"color: {col};")
-            self.bar.setProperty("stalled", "true" if stalled else "false")
-            self.bar.style().unpolish(self.bar)
-            self.bar.style().polish(self.bar)
+            _style(self.times, f"color: {col};")
+            if self.bar.property("stalled") != ("true" if stalled else "false"):
+                self.bar.setProperty("stalled", "true" if stalled else "false")
+                self.bar.style().unpolish(self.bar)
+                self.bar.style().polish(self.bar)
             n = len(self.q.waiting)
             self.queued.setText(f"{n} more queued" if n else "")
             self.queued.setVisible(bool(n))
             self.pause_btn.setVisible(qj.pausable)
             self.pause_btn.setText("Resume" if qj.paused else "Pause")
-            self.pause_btn.setIcon(icon("play" if qj.paused else "pause", C["text"], 15))
+            _icon(self.pause_btn, "play" if qj.paused else "pause", C["text"], 15)
             self.stop_btn.setVisible(True)
             if qj.ai and not self.hw.isVisible():
                 self.hw.setVisible(True)
@@ -330,7 +353,7 @@ class StatusBar(QWidget):
             frac = done / total if total else 0.0
             self.name.setText("Identifying songs")
             self.detail.setText(f"{done} of {total}" + (f" · {st.get('current')}" if st.get("current") else ""))
-            self.detail.setStyleSheet(f"color: {C['sec']};")
+            _style(self.detail, f"color: {C['sec']};")
             self.bar.setVisible(True)
             self.bar.setRange(0, 1000)
             self.bar.setValue(int(frac * 1000))
@@ -338,10 +361,10 @@ class StatusBar(QWidget):
             self.pct.setText(f"{frac * 100:.0f}%")
             el = now - float(st.get("started") or now)
             self.times.setText(f"Paused · {done} done" if id_paused else times_text(el, frac))
-            self.times.setStyleSheet(f"color: {C['warn'] if id_paused else C['sec']};")
+            _style(self.times, f"color: {C['warn'] if id_paused else C['sec']};")
             self.pause_btn.setVisible(True)
             self.pause_btn.setText("Resume" if id_paused else "Pause")
-            self.pause_btn.setIcon(icon("play" if id_paused else "pause", C["text"], 15))
+            _icon(self.pause_btn, "play" if id_paused else "pause", C["text"], 15)
             return
         self.pause_btn.setVisible(False)
         self.bar.setVisible(False)
@@ -351,8 +374,8 @@ class StatusBar(QWidget):
         if last is not None:
             self.detail.setText(last.result_text)
             col = C["danger"] if last.state == "failed" else C["sec"]
-            self.detail.setStyleSheet(f"color: {col};")
+            _style(self.detail, f"color: {col};")
         else:
             self.detail.setText("Nothing running")
-            self.detail.setStyleSheet(f"color: {C['sec']};")
+            _style(self.detail, f"color: {C['sec']};")
         self.times.setText("")
