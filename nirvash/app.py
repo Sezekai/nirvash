@@ -193,9 +193,17 @@ def _quick_exit(code: int) -> None:
     """Leave without Python tearing down Qt objects one by one at exit, which can crash on Windows after the
     window has already closed cleanly. Everything is saved by then; logs are flushed first."""
     import logging
-    logging.shutdown()
-    sys.stdout.flush()
-    sys.stderr.flush()
+    import threading
+    # flush in a helper thread so a stuck handler can't keep Nirvash open
+    t = threading.Thread(target=logging.shutdown, daemon=True)
+    t.start()
+    t.join(3)
+    for stream in (sys.stdout, sys.stderr):   # both are None in the packaged app (no console)
+        try:
+            if stream:
+                stream.flush()
+        except Exception:
+            pass
     os._exit(code or 0)
 
 
