@@ -1,6 +1,4 @@
-import sys
-
-from nirvash.app import main
+from nirvash.app import _quick_exit, main
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _quick_exit(main())

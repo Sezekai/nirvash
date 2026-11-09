@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QByteArray, QEvent, QObject, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QKeySequence, QLinearGradient, QPainter, QShortcut
+from PySide6.QtGui import QGuiApplication, QColor, QKeySequence, QLinearGradient, QPainter, QShortcut
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
                                QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QStackedWidget, QTextEdit,
                                QToolButton, QVBoxLayout, QWidget)
@@ -265,7 +265,10 @@ class MainWindow(QMainWindow):
         self.s = get_settings()
         self.setWindowTitle(APP_NAME)
         self.resize(1480, 900)
-        self.setMinimumSize(1100, 680)
+        # 1100 × 680 is the smallest the screens are designed for, but never bigger than the screen itself
+        scr = QGuiApplication.primaryScreen()
+        av = scr.availableGeometry() if scr else None
+        self.setMinimumSize(min(1100, av.width()) if av else 1100, min(680, av.height()) if av else 680)
         self.native_frame = frameless.enable(self)
         geo = self.s.get("ui.geometry")
         if geo:

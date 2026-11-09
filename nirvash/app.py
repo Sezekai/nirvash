@@ -1,6 +1,7 @@
 """Entry point."""
 from __future__ import annotations
 
+import os
 import sys
 import traceback
 
@@ -177,8 +178,20 @@ def main() -> int:
     server = _listen(w)  # noqa: F841  (kept alive for the life of the app)
     w.show()
     log.info("%s started", APP_NAME)
-    return app.exec()
+    code = app.exec()
+    log.info("%s closed", APP_NAME)
+    return code
+
+
+def _quick_exit(code: int) -> None:
+    """Leave without Python tearing down Qt objects one by one at exit, which can crash on Windows after the
+    window has already closed cleanly. Everything is saved by then; logs are flushed first."""
+    import logging
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code or 0)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _quick_exit(main())
