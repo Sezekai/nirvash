@@ -38,7 +38,15 @@ jobs:
         run: |
           $env:PATH = "$PWD\bin;$env:PATH"
           $env:NIRVASH_AUTO_DIALOGS = "accept"
-          python -m pytest -q tests/test_pipeline.py tests/test_download.py tests/test_ui_flows.py tests/test_processes.py tests/test_ownership.py tests/test_library_ops.py tests/test_library_ui.py tests/test_shell.py
+          python -X faulthandler -m pytest -q tests/test_pipeline.py tests/test_download.py tests/test_ui_flows.py tests/test_processes.py tests/test_ownership.py tests/test_library_ops.py tests/test_library_ui.py
+          $a = $LASTEXITCODE; "main tests exit: $a"
+          python -X faulthandler -m pytest -q -rs tests/test_shell.py
+          $b = $LASTEXITCODE; "shell tests exit: $b"
+          # the real window frame, on the runner's desktop rather than offscreen
+          $env:QT_QPA_PLATFORM = "windows"
+          python -X faulthandler -m pytest -q -rs tests/test_shell.py -k windows_frame
+          $c = $LASTEXITCODE; "window frame test exit: $c"
+          if ($a -ne 0 -or $b -ne 0 -or $c -ne 0) { exit 1 }
 
       - name: Cache AI models
         uses: actions/cache@v4
