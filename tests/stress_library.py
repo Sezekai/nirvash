@@ -80,6 +80,8 @@ def pump(sec):
 
 pump(1)
 print("window shown", flush=True)
+import faulthandler  # noqa: E402
+faulthandler.dump_traceback_later(600, repeat=True)   # every 10 min: where it is (slow under page heap, or stuck)
 
 # Background updates like song identification does: DB writes + change signals from another thread.
 import threading  # noqa: E402

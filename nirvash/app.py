@@ -13,12 +13,19 @@ def selftest(out: str) -> int:
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     res: dict[str, str] = {}
+    # If a check ever hangs, say where (the build waits on this)
+    import faulthandler
+    hang = open(out + ".hang.txt", "w", encoding="utf-8")  # noqa: SIM115
+    faulthandler.dump_traceback_later(120, exit=True, file=hang)
 
     def check(name, fn):
+        res[name] = "running"
         try:
             res[name] = "ok: " + str(fn())[:200]
         except Exception as e:  # noqa: BLE001
             res[name] = f"FAIL: {e!r}"[:300]
+        with open(out, "w", encoding="utf-8") as fh:  # written after every check, so a hang shows which
+            json.dump(res, fh, indent=2)
 
     from .core.paths import bin_path
     from .media import ff
@@ -57,8 +64,7 @@ def selftest(out: str) -> int:
         return f"{w.library.player.backend} playback"
 
     check("ui", _ui)
-    with open(out, "w", encoding="utf-8") as fh:
-        json.dump(res, fh, indent=2)
+    faulthandler.cancel_dump_traceback_later()
     return 1 if any(v.startswith("FAIL") for v in res.values()) else 0
 
 

@@ -57,6 +57,7 @@ jobs:
           New-ItemProperty -Path $k -Name PageHeapFlags -Value 0x3 -PropertyType DWord -Force | Out-Null
 
       - name: Page heap - current code, library stress + all UI flows
+        timeout-minutes: 50
         shell: pwsh
         run: |
           $env:PATH = "$PWD\bin;$env:PATH"

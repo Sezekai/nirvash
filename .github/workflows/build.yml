@@ -79,10 +79,15 @@ jobs:
         run: pyinstaller --noconfirm --clean --distpath dist --workpath build/work build/nirvash.spec
 
       - name: Self-test the built app
+        timeout-minutes: 6
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath "dist\App\Nirvash.exe" -ArgumentList "--selftest", "$PWD\selftest.json" -Wait -PassThru
+          # wait for Nirvash itself (-Wait would also wait for anything it started)
+          $p = Start-Process -FilePath "dist\App\Nirvash.exe" -ArgumentList "--selftest", "$PWD\selftest.json" -PassThru
+          if (-not $p.WaitForExit(240000)) { "Nirvash is still running after 4 minutes"; $p.Kill() }
+          Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $p.Id } | Select-Object ProcessId, Name, CommandLine | Format-List
           Get-Content selftest.json
+          if (Test-Path selftest.json.hang.txt) { Get-Content selftest.json.hang.txt }
           if ($p.ExitCode -ne 0) { throw "self-test failed ($($p.ExitCode))" }
 
       - name: Package
