@@ -8,7 +8,7 @@ on:
 jobs:
   stress:
     runs-on: windows-latest
-    timeout-minutes: 75
+    timeout-minutes: 90
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -57,7 +57,7 @@ jobs:
           New-ItemProperty -Path $k -Name PageHeapFlags -Value 0x3 -PropertyType DWord -Force | Out-Null
 
       - name: Page heap - current code, library stress + all UI flows
-        timeout-minutes: 50
+        timeout-minutes: 65
         shell: pwsh
         run: |
           $env:PATH = "$PWD\bin;$env:PATH"
