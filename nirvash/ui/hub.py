@@ -12,6 +12,8 @@ class Hub(QObject):
     modelsChanged = Signal()
     logLine = Signal(str, str)
     toast = Signal(str, str)         # message, kind (info|ok|warn|error)
+    movesChanged = Signal()          # the move log changed
+    themeChanged = Signal()          # the look changed (Appearance)
 
 
 hub = Hub()

@@ -62,6 +62,10 @@ CREATE TABLE IF NOT EXISTS song_usage (
 );
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS ignored_videos (path TEXT PRIMARY KEY, added_at REAL);
+CREATE TABLE IF NOT EXISTS moves (
+    id INTEGER PRIMARY KEY, at REAL NOT NULL, action TEXT NOT NULL, song_id INTEGER,
+    src TEXT NOT NULL, dst TEXT NOT NULL, note TEXT, undone REAL
+);
 CREATE TABLE IF NOT EXISTS ignored_songs (
     id INTEGER PRIMARY KEY, fingerprint BLOB NOT NULL, duration REAL, added_at REAL
 );
@@ -260,6 +264,26 @@ class DB:
             c.execute("DELETE FROM ignored_videos")
             c.execute("DELETE FROM ignored_songs")
             c.commit()
+
+    # ---- move log: every rename / move of a file, with Undo ----------------------
+    def log_move(self, action: str, src: str, dst: str, song_id: int | None = None, note: str = "") -> int:
+        return self.x("INSERT INTO moves(at, action, song_id, src, dst, note) VALUES(?,?,?,?,?,?)",
+                      (time.time(), action, song_id, src, dst, note))
+
+    def moves(self, limit: int = 300) -> list:
+        return self.q("SELECT * FROM moves ORDER BY id DESC LIMIT ?", (limit,))
+
+    def move(self, mid: int):
+        return self.one("SELECT * FROM moves WHERE id=?", (mid,))
+
+    def last_move(self):
+        return self.one("SELECT * FROM moves WHERE undone IS NULL ORDER BY id DESC LIMIT 1")
+
+    def mark_undone(self, mid: int) -> None:
+        self.x("UPDATE moves SET undone=? WHERE id=?", (time.time(), mid))
+
+    def clear_moves(self) -> None:
+        self.x("DELETE FROM moves")
 
     # ---- categories -------------------------------------------------------
     def categories(self) -> list[sqlite3.Row]:

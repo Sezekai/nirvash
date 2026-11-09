@@ -27,6 +27,10 @@ class _ListenerHandler(logging.Handler):
                 pass
 
 
+def log_dir():
+    return paths.ensure(paths.data_dir() / "logs")
+
+
 def setup() -> logging.Logger:
     log = logging.getLogger("nirvash")
     if log.handlers:
@@ -57,10 +61,10 @@ def clear() -> int:
                     n += 1
             finally:
                 h.release()
-    for f in list(d.glob("nirvash.log.*")) + [d / "crash.log"]:
+    for f in list(d.glob("nirvash.log.*")) + list(d.glob("crash*.txt")) + [d / "crash.log"]:
         try:
             if f.exists():
-                f.write_text("", encoding="utf-8") if f.name == "crash.log" else f.unlink()
+                f.write_text("", encoding="utf-8") if f.name.startswith("crash") else f.unlink()
                 n += 1
         except OSError:
             pass

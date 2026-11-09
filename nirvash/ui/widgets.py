@@ -8,8 +8,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPixmap
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLayout, QPushButton, QSizePolicy, QSlider, QToolButton,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLabel, QLayout, QPushButton,
+                               QSizePolicy, QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from ..media.ff import fmt_time
 from . import theme
@@ -20,6 +20,95 @@ def card(name: str = "card") -> QFrame:
     f = QFrame()
     f.setObjectName(name)
     return f
+
+
+def panel() -> QFrame:
+    return card("panel")
+
+
+def page_header(title: str, desc: str = "") -> tuple[QHBoxLayout, QLabel]:
+    """One line: the screen's title, then what it does (cut short with … when narrow)."""
+    row = QHBoxLayout()
+    row.setSpacing(10)
+    t = QLabel(title)
+    t.setObjectName("h1")
+    row.addWidget(t)
+    d = ElidedLabel(desc)
+    d.setObjectName("faint")
+    row.addWidget(d, 1)
+    return row, d
+
+
+class ElidedLabel(QLabel):
+    """A one-line label that cuts long text with … instead of widening the window."""
+
+    def __init__(self, text: str = "", parent=None, mode=Qt.ElideRight):
+        super().__init__(parent)
+        self._full = text
+        self._mode = mode
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(20)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        self._full = text or ""
+        self.setToolTip(self._full if len(self._full) > 40 else "")
+        self._elide()
+
+    def fullText(self) -> str:  # noqa: N802
+        return self._full
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._elide()
+
+    def _elide(self) -> None:
+        w = max(10, self.width())
+        super().setText(self.fontMetrics().elidedText(self._full, self._mode, w))
+
+
+class Segmented(QFrame):
+    """A segmented control: one choice of a few, counts in faint text after the labels."""
+
+    changed = Signal(object)
+
+    def __init__(self, options: list[tuple[object, str]], value=None, parent=None):
+        super().__init__(parent)
+        self.setObjectName("segtrack")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(2)
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        self.buttons: dict = {}
+        self.labels: dict = {}
+        for key, text in options:
+            b = QPushButton(text)
+            b.setObjectName("seg")
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, k=key: self._pick(k))
+            self.group.addButton(b)
+            lay.addWidget(b)
+            self.buttons[key] = b
+            self.labels[key] = text
+        self.value = None
+        self.set_value(value if value is not None else options[0][0])
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+
+    def _pick(self, key) -> None:
+        if key != self.value:
+            self.value = key
+            self.changed.emit(key)
+
+    def set_value(self, key) -> None:
+        self.value = key
+        if key in self.buttons:
+            self.buttons[key].setChecked(True)
+
+    def set_count(self, key, n: int | None) -> None:
+        if key in self.buttons:
+            self.buttons[key].setText(self.labels[key] + (f"  {n:,}" if n is not None else ""))
 
 
 def hline() -> QFrame:
@@ -36,8 +125,9 @@ def label(text: str = "", obj: str | None = None, wrap: bool = False) -> QLabel:
     return l
 
 
-def tool(name: str, tip: str, color: str = C["text"], size: int = 18, checkable: bool = False,
+def tool(name: str, tip: str, color: str | None = None, size: int = 16, checkable: bool = False,
          checked_color: str | None = None) -> QToolButton:
+    color = color or C["text"]
     b = QToolButton()
     b.setIcon(icon(name, color, size, checked_color))
     b.setIconSize(QSize(size, size))
@@ -47,23 +137,29 @@ def tool(name: str, tip: str, color: str = C["text"], size: int = 18, checkable:
     return b
 
 
-def button(text: str, icon_name: str | None = None, obj: str | None = None, color: str = C["text"]) -> QPushButton:
+def button(text: str, icon_name: str | None = None, obj: str | None = None, color: str | None = None) -> QPushButton:
     b = QPushButton(text)
     if icon_name:
-        b.setIcon(icon(icon_name, "#0b0c14" if obj == "primary" else color, 16))
-        b.setIconSize(QSize(16, 16))
+        col = C["on_acc"] if obj == "primary" else (C["danger"] if obj in ("dangerGhost", "danger") else
+                                                    (C["sec"] if obj == "ghost" else (color or C["text"])))
+        b.setIcon(icon(icon_name, col, 15))
+        b.setIconSize(QSize(15, 15))
     if obj:
         b.setObjectName(obj)
     b.setCursor(Qt.PointingHandCursor)
     return b
 
 
-def chip(text: str, color: str = C["violet"], filled: bool = False) -> QLabel:
+def chip(text: str, color: str | None = None, filled: bool = False) -> QLabel:
+    """A 20 px round tag: state (ok / warn / danger), or a colour you gave a group."""
+    color = color or C["violet"]
     l = QLabel(text)
     qc = QColor(color)
-    bg = f"rgba({qc.red()},{qc.green()},{qc.blue()},{0.9 if filled else 0.16})"
-    fg = "#0b0c14" if filled else color
-    l.setStyleSheet(f"background:{bg}; color:{fg}; border-radius:9px; padding:2px 9px; font-size:8.5pt; font-weight:600;")
+    bg = f"rgba({qc.red()},{qc.green()},{qc.blue()},{0.9 if filled else 0.14})"
+    bd = f"rgba({qc.red()},{qc.green()},{qc.blue()},{0.9 if filled else 0.55})"
+    fg = "#0b0c0f" if filled else color
+    l.setStyleSheet(f"background:{bg}; color:{fg}; border:1px solid {bd}; border-radius:9px; padding:0 7px;"
+                    f"min-height:16px; max-height:16px; font-size:11px; font-weight:600;")
     l.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
     return l
 
@@ -115,7 +211,7 @@ class FlowLayout(QLayout):
     def _layout(self, rect, test: bool) -> int:
         x, y, line = rect.x(), rect.y(), 0
         for it in self._items:
-            hint = it.sizeHint()
+            hint = it.sizeHint().expandedTo(it.minimumSize()).boundedTo(it.maximumSize())
             if x + hint.width() > rect.right() + 1 and line > 0:
                 x = rect.x()
                 y += line + self._sp
@@ -198,49 +294,46 @@ def cover_pixmap(path: str | None, size: int, seed: str = "", radius: int = 12) 
 
 
 class PlayerBar(QFrame):
-    """Play button, title, waveform, time and volume - drives a Player."""
+    """Play button, title, waveform, time and volume - drives a Player. One compact line."""
 
     def __init__(self, player, parent=None, show_title: bool = True):
         super().__init__(parent)
         from ..core.settings import get_settings
         from .waveform import Waveform
 
-        self.setObjectName("card")
+        self.setObjectName("panel")
         self.player = player
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 8, 12, 8)
-        lay.setSpacing(12)
+        lay.setContentsMargins(8, 5, 10, 5)
+        lay.setSpacing(10)
         self.play_btn = QToolButton()
-        self.play_btn.setIcon(icon("play", "#0b0c14", 18))
-        self.play_btn.setIconSize(QSize(18, 18))
-        self.play_btn.setFixedSize(38, 38)
+        self.play_btn.setObjectName("playRound")
+        self.play_btn.setIconSize(QSize(13, 13))
+        self.play_btn.setFixedSize(28, 28)
         self.play_btn.setCursor(Qt.PointingHandCursor)
         self.play_btn.setToolTip("Play / pause (Space)")
-        self.play_btn.setStyleSheet(
-            f"QToolButton {{ border-radius: 19px; background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {C['teal']}, stop:1 {C['violet']}); }}"
-            "QToolButton:hover { background: #ffffff; }")
         self.play_btn.clicked.connect(self.player.toggle)
+        self._restyle()
         lay.addWidget(self.play_btn)
-        mid = QVBoxLayout()
-        mid.setSpacing(2)
-        self.title = label("Nothing playing", "muted")
-        self.title.setVisible(show_title)
-        mid.addWidget(self.title)
-        row = QHBoxLayout()
+        self.title = ElidedLabel("Nothing playing")
+        self.title.setObjectName("h2")
+        self.title.setFixedWidth(240)
+        self.title.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)   # Ignored would let the time overlap it
+        lay.addWidget(self.title)
+        if not show_title:      # only after it has a parent: showing a parentless label makes it a window
+            self.title.hide()
         self.t_pos = label("0:00", "muted")
-        self.wave = Waveform(height=38)
+        self.wave = Waveform(height=26)
         self.t_dur = label("0:00", "muted")
-        row.addWidget(self.t_pos)
-        row.addWidget(self.wave, 1)
-        row.addWidget(self.t_dur)
-        mid.addLayout(row)
-        lay.addLayout(mid, 1)
-        vol_icon = QLabel()
-        vol_icon.setPixmap(theme.pixmap("volume", 16, C["muted"]))
-        lay.addWidget(vol_icon)
+        lay.addWidget(self.t_pos)
+        lay.addWidget(self.wave, 1)
+        lay.addWidget(self.t_dur)
+        self.vol_icon = QLabel()
+        self.vol_icon.setPixmap(theme.pixmap("volume", 15, C["sec"]))
+        lay.addWidget(self.vol_icon)
         self.vol = QSlider(Qt.Horizontal)
         self.vol.setRange(0, 100)
-        self.vol.setFixedWidth(90)
+        self.vol.setFixedWidth(84)
         self.vol.setValue(int(get_settings().get("ui.volume", 80)))
         self.vol.valueChanged.connect(self._vol)
         self.player.set_volume(self.vol.value())
@@ -249,6 +342,16 @@ class PlayerBar(QFrame):
         self.player.positionChanged.connect(self._pos)
         self.player.durationChanged.connect(self._dur)
         self.player.playingChanged.connect(self._playing)
+        self._on = False
+
+    def _restyle(self) -> None:
+        self.play_btn.setStyleSheet(
+            f"QToolButton#playRound {{ border-radius: 14px; background: {theme.grad()}; padding: 0; }}"
+            f"QToolButton#playRound:hover {{ background: {C['text']}; }}")
+        self.play_btn.setIcon(icon("pause" if getattr(self, "_on", False) else "play", C["on_acc"], 13))
+
+    def nudge_volume(self, delta: int) -> None:
+        self.vol.setValue(max(0, min(100, self.vol.value() + delta)))
 
     def _vol(self, v: int) -> None:
         from ..core.settings import get_settings
@@ -265,7 +368,8 @@ class PlayerBar(QFrame):
             self.wave.duration = s
 
     def _playing(self, on: bool) -> None:
-        self.play_btn.setIcon(icon("pause" if on else "play", "#0b0c14", 18))
+        self._on = on
+        self.play_btn.setIcon(icon("pause" if on else "play", C["on_acc"], 13))
 
     def load(self, path: str, key: str, duration: float, title: str, play: bool = True) -> None:
         self.title.setText(title)
@@ -274,31 +378,16 @@ class PlayerBar(QFrame):
         self.player.load(path, play=play)
 
 
-class Toggle(QPushButton):
-    """A pill switch."""
+class Toggle(QCheckBox):
+    """An on/off option: a native checkbox in the accent (DESIGN.md). Kept under its old name."""
 
     toggledOn = Signal(bool)
 
-    def __init__(self, checked: bool = False, parent=None):
-        super().__init__(parent)
-        self.setCheckable(True)
+    def __init__(self, checked: bool = False, parent=None, text: str = ""):
+        super().__init__(text, parent)
         self.setChecked(checked)
-        self.setFixedSize(40, 22)
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
-        self.toggled.connect(lambda v: (self.update(), self.toggledOn.emit(v)))
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        on = self.isChecked()
-        bg = QColor(C["teal"]) if on else QColor(C["surface3"])
-        p.setBrush(bg)
-        p.setPen(Qt.NoPen)
-        p.drawRoundedRect(0, 0, 40, 22, 11, 11)
-        p.setBrush(QColor("#0b0c14") if on else QColor(C["muted"]))
-        p.drawEllipse(21 if on else 3, 3, 16, 16)
-        p.end()
+        self.toggled.connect(self.toggledOn.emit)
 
 
 def fmt_dur(s: float) -> str:
@@ -331,7 +420,7 @@ class TaskProgress(QWidget):
         top = QHBoxLayout()
         top.setSpacing(10)
         self.pct = label("0%")
-        self.pct.setStyleSheet(f"font-weight:700; color:{C['teal']};")
+        self.pct.setStyleSheet("font-weight:600;")
         self.times = label("", "muted")
         self.detail = label("", "muted")
         self.detail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -364,7 +453,7 @@ class TaskProgress(QWidget):
     def update(self, frac: float, detail: str | None = None) -> None:
         if not self.running:
             self.start()
-        self.frac = max(0.0, min(1.0, float(frac)))
+        self.frac = max(0.0, min(0.99, float(frac)))      # 100% only when finish() says it's done
         self.bar.setValue(int(self.frac * 1000))
         if detail is not None:
             self.detail.setText(detail)
@@ -395,3 +484,6 @@ class TaskProgress(QWidget):
         if text:
             self.detail.setText(text)
             self.detail.setToolTip(text)
+            if not text.lower().startswith(("stop", "fail")):
+                self.bar.setValue(1000)
+                self.pct.setText("100%")

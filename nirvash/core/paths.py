@@ -47,17 +47,61 @@ def default_root() -> Path:
     return a / "_dev_root"
 
 
-def data_dir() -> Path:
+def home_data_dir() -> Path:
+    """%LOCALAPPDATA%\\Nirvash: where the small files live, or where the pointer to their new place is kept."""
     env = os.environ.get("NIRVASH_DATA")
     if env:
-        p = Path(env)
-    elif sys.platform == "win32":
+        return Path(env)
+    if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        p = Path(base) / APP_NAME
-    else:
-        p = Path.home() / ".local" / "share" / APP_NAME
+        return Path(base) / APP_NAME
+    return Path.home() / ".local" / "share" / APP_NAME
+
+
+POINTER = "location.json"
+_data_dir: Path | None = None
+
+
+def read_pointer() -> dict:
+    import json
+    try:
+        return json.loads((home_data_dir() / POINTER).read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def data_dir() -> Path:
+    """Settings, database, logs, themes. Normally %LOCALAPPDATA%\\Nirvash; Settings > Storage can move it, and a
+    pointer file left in %LOCALAPPDATA%\\Nirvash remembers where."""
+    global _data_dir
+    env = os.environ.get("NIRVASH_DATA")
+    if env:                                   # tests and CI: never cached, never redirected
+        pe = Path(env)
+        pe.mkdir(parents=True, exist_ok=True)
+        return pe
+    if _data_dir is not None:
+        return _data_dir
+    home = home_data_dir()
+    p = home
+    moved = read_pointer().get("data")
+    if moved and not os.environ.get("NIRVASH_DATA"):
+        mp = Path(moved)
+        if Path(mp.anchor or str(mp)).exists():
+            p = mp
     p.mkdir(parents=True, exist_ok=True)
+    _data_dir = p
     return p
+
+
+def reset_data_dir_cache() -> None:
+    global _data_dir
+    _data_dir = None
+
+
+def drive_ok(p: Path) -> bool:
+    """False when the drive (or network share) a folder is on isn't connected."""
+    anchor = Path(p).anchor
+    return not anchor or Path(anchor).exists()
 
 
 def local_appdata() -> Path:
@@ -85,5 +129,8 @@ def asset(name: str) -> Path:
 
 
 def ensure(p: Path) -> Path:
-    p.mkdir(parents=True, exist_ok=True)
+    """Create a folder - but never on a drive that isn't connected (a missing E: must not quietly become an empty
+    folder somewhere else)."""
+    if drive_ok(p):
+        p.mkdir(parents=True, exist_ok=True)
     return p

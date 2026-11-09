@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 tmp = Path(tempfile.mkdtemp())
 os.environ["NIRVASH_DATA"] = str(tmp / "data")
+os.environ.setdefault("NIRVASH_AUTO_DIALOGS", "accept")
 os.environ["NIRVASH_ROOT"] = str(tmp / "root")
 
 
@@ -53,8 +54,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 app = QApplication(sys.argv)
 from nirvash.ui import theme  # noqa: E402
 
-theme.check_svg_resource()
-app.setStyleSheet(theme.fixed_stylesheet())
+theme.apply(app)
 from nirvash.ui.main_window import MainWindow  # noqa: E402
 
 MainWindow._check_models = lambda self: None

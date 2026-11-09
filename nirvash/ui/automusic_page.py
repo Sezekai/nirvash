@@ -6,23 +6,25 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout,
-                               QHBoxLayout, QHeaderView, QProgressBar, QPushButton, QSizePolicy, QSlider, QSplitter,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                               QHBoxLayout, QHeaderView, QLineEdit, QProgressBar, QPushButton, QSizePolicy, QSlider,
+                               QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..core.db import get_db
 from ..core.settings import SHORT_SONG_MODES, get_settings
 from ..jobs import automusic as am
 from ..media import ff
 from ..media.ff import fmt_time
-from . import workers
+from . import theme, workers
 from .hub import hub
+from .jobqueue import get_queue
 from .player import Player
 from .song_picker import SongPicker
 from .theme import C, icon
-from .widgets import (PlayerBar, TaskProgress, Toggle, button, card, chip, clear_layout, cover_pixmap, label, open_in_explorer, tool)
+from .widgets import (PlayerBar, Toggle, button, card, chip, clear_layout, cover_pixmap, label, open_in_explorer,
+                      page_header, panel, tool)
 
-STATUS_TXT = {"new": ("Not matched", C["faint"]), "matched": ("Matched", C["violet"]), "no_match": ("No song fits", C["amber"]),
-              "exported": ("Exported", C["teal"]), "error": ("Error", C["red"])}
+STATUS_TXT = {"new": ("Not matched", "faint"), "matched": ("Matched", "violet"), "no_match": ("No song fits", "warn"),
+              "exported": ("Exported", "ok"), "error": ("Error", "danger")}
 
 
 def find_songs_job(ctx, folder: str, recursive: bool, existing: list[am.AutoItem]) -> list[am.AutoItem]:
@@ -45,6 +47,7 @@ def find_songs_job(ctx, folder: str, recursive: bool, existing: list[am.AutoItem
     if ok:
         sub = am.JobContext(lambda f, m: ctx.progress(0.7 + 0.3 * f, m), lambda k, p: ctx.event(k, p))
         sub.cancel = ctx.cancel
+        sub.running = ctx.running
         am.match_items(ok, sub)
     return items
 
@@ -52,8 +55,9 @@ def find_songs_job(ctx, folder: str, recursive: bool, existing: list[am.AutoItem
 def export_job(ctx, items: list[am.AutoItem]) -> list[am.AutoItem]:
     for n, it in enumerate(items):
         ctx.check()
-        sub = am.JobContext(lambda f, m, n=n: ctx.progress((n + f) / len(items), f"video {n + 1} of {len(items)} · {m}"))
+        sub = am.JobContext(lambda f, m, n=n: ctx.progress((n + f) / len(items), f"Video {n + 1} of {len(items)} · {m}"))
         sub.cancel = ctx.cancel
+        sub.running = ctx.running
         try:
             am.export_item(it, sub)
         except InterruptedError:
@@ -70,129 +74,183 @@ class AutoMusicPage(QWidget):
         super().__init__()
         self.setObjectName("page")
         self.s = get_settings()
+        self.queue = get_queue()
         self.folder, self.items = am.load_session()
         self.cur: am.AutoItem | None = None
-        self.job: workers.Job | None = None
+        self.job = None
         self._preview_token = 0
         root = QVBoxLayout(self)
-        root.setContentsMargins(22, 18, 22, 14)
-        root.setSpacing(12)
-
-        head = QHBoxLayout()
-        head.addWidget(label("Auto-music", "h1"))
-        head.addSpacing(12)
-        self.folder_lbl = label("", "muted")
-        head.addWidget(self.folder_lbl, 1)
-        pick = button("Choose folder", "folder")
-        pick.clicked.connect(self.choose_folder)
-        head.addWidget(pick)
-        self.find_btn = button("Find songs", "sparkle", "primary")
-        self.find_btn.clicked.connect(self.find_songs)
-        head.addWidget(self.find_btn)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(8)
+        head, _ = page_header("Auto-music", "Picks a song for each video without sound. Check them, swap any, then "
+                                            "export: the video is copied untouched")
         root.addLayout(head)
 
-        opts = QHBoxLayout()
-        opts.setSpacing(8)
-        self.t_rec = Toggle(bool(self.s.get("automusic.recursive", False)))
+        self.toolbar = panel()
+        tl = QVBoxLayout(self.toolbar)
+        tl.setContentsMargins(10, 8, 10, 8)
+        tl.setSpacing(8)
+        r1 = QHBoxLayout()
+        r1.setSpacing(8)
+        lb = label("Folder", "cap")
+        lb.setFixedWidth(88)
+        r1.addWidget(lb)
+        self.folder_lbl = QLineEdit()
+        self.folder_lbl.setReadOnly(True)
+        self.folder_lbl.setPlaceholderText("Choose a folder of videos without sound")
+        r1.addWidget(self.folder_lbl, 1)
+        pick = button("Choose folder", "folder")
+        pick.clicked.connect(self.choose_folder)
+        r1.addWidget(pick)
+        self.stop_btn = button("Stop", "x")       # kept for older callers; Stop lives in the status bar
+        self.stop_btn.setVisible(False)
+        self.find_btn = button("Find songs", "sparkle", "primary")
+        self.find_btn.clicked.connect(self.find_songs)
+        r1.addWidget(self.find_btn)
+        tl.addLayout(r1)
+        r2 = QHBoxLayout()
+        r2.setSpacing(14)
+        lb = label("Options", "cap")
+        lb.setFixedWidth(88)
+        r2.addWidget(lb)
+        self.t_rec = Toggle(bool(self.s.get("automusic.recursive", False)), text="Include subfolders")
         self.t_rec.toggledOn.connect(lambda v: self.s.set("automusic.recursive", v))
-        opts.addWidget(self.t_rec)
-        opts.addWidget(label("Include subfolders"))
-        opts.addSpacing(18)
-        opts.addWidget(label("Prefer songs in category", "muted"))
+        r2.addWidget(self.t_rec)
+        r2.addWidget(label("Prefer songs in category", "muted"))
         self.rule = QComboBox()
         self.rule.setMinimumWidth(170)
         self.rule.activated.connect(self._rule_changed)
-        opts.addWidget(self.rule)
-        opts.addStretch(1)
-        self.status = label("", "muted")
-        opts.addWidget(self.status)
-        self.stop_btn = button("Stop", "x")
-        self.stop_btn.setVisible(False)
-        self.stop_btn.clicked.connect(lambda: self.job and self.job.cancel())
-        opts.addWidget(self.stop_btn)
-        root.addLayout(opts)
-        self.task = TaskProgress(compact=True)
-        self.task.setVisible(False)
-        root.addWidget(self.task)
+        r2.addWidget(self.rule)
+        r2.addStretch(1)
+        self.status = label("", "faint")
+        r2.addWidget(self.status)
+        tl.addLayout(r2)
+        root.addWidget(self.toolbar)
 
         split = QSplitter(Qt.Horizontal)
-        split.setHandleWidth(12)
-        left = QWidget()
+        split.setHandleWidth(8)
+        split.setChildrenCollapsible(False)
+        left = panel()
+        self.left = left
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
-        ll.setSpacing(8)
+        ll.setSpacing(0)
+        eb = QHBoxLayout()
+        eb.setContentsMargins(10, 6, 8, 6)
+        eb.setSpacing(8)
+        self.summary = label("", "h2")
+        eb.addWidget(self.summary, 1)
+        self.exp_ready = button("Export ready", "export")
+        self.exp_ready.setToolTip("Export the videos ticked as Ready")
+        self.exp_ready.clicked.connect(lambda: self.export([i for i in self.items if i.ready and i.song_id and i.status != "exported"]))
+        eb.addWidget(self.exp_ready)
+        self.exp_all = button("Export all", "export")
+        self.exp_all.setToolTip("Export every matched video that hasn't been exported yet")
+        self.exp_all.clicked.connect(lambda: self.export([i for i in self.items if i.song_id and i.status == "matched"]))
+        eb.addWidget(self.exp_all)
+        ll.addLayout(eb)
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["Ready", "Video", "Length", "Song", "Status"])
         self.table.verticalHeader().hide()
-        self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.verticalHeader().setDefaultSectionSize(theme.T["rh"])
         self.table.setShowGrid(False)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.setWordWrap(False)
+        self.table.setStyleSheet("QTableWidget { border: none; border-top: 1px solid " + C["line"] + "; border-radius: 0; }")
         hh = self.table.horizontalHeader()
-        for i, w in enumerate((54, 220, 64, 220, 110)):
+        hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        for i, w in enumerate((50, 220, 60, 220, 100)):
             self.table.setColumnWidth(i, w)
         hh.setSectionResizeMode(1, QHeaderView.Stretch)
         hh.setSectionResizeMode(3, QHeaderView.Stretch)
         self.table.cellClicked.connect(self._cell_clicked)
         self.table.currentCellChanged.connect(lambda r, *_: self._select(r))
         ll.addWidget(self.table, 1)
-        eb = QHBoxLayout()
-        self.summary = label("", "muted")
-        eb.addWidget(self.summary, 1)
-        self.exp_ready = button("Export ready", "export")
-        self.exp_ready.setToolTip("Export the videos ticked as Ready")
-        self.exp_ready.clicked.connect(lambda: self.export([i for i in self.items if i.ready and i.song_id and i.status != "exported"]))
-        eb.addWidget(self.exp_ready)
-        self.exp_all = button("Export all", "export", "primary")
-        self.exp_all.setToolTip("Export every matched video that hasn't been exported yet")
-        self.exp_all.clicked.connect(lambda: self.export([i for i in self.items if i.song_id and i.status == "matched"]))
-        eb.addWidget(self.exp_all)
-        ll.addLayout(eb)
         split.addWidget(left)
 
         right = QWidget()
+        right.setObjectName("transparent")
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(10)
+        rl.setSpacing(8)
         self.player = Player(self, video=True)
-        self.player.setMinimumHeight(220)
+        self.player.setMinimumHeight(110)
         self.player.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         rl.addWidget(self.player, 1)
         self.bar = PlayerBar(self.player, show_title=False)
         rl.addWidget(self.bar)
-        self.song_card = card()
+        self.song_card = panel()
         self.song_card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.song_lay = QVBoxLayout(self.song_card)
-        self.song_lay.setContentsMargins(14, 12, 14, 12)
-        self.song_lay.setSpacing(8)
+        self.song_lay.setContentsMargins(12, 10, 12, 10)
+        self.song_lay.setSpacing(6)
         rl.addWidget(self.song_card)
-        self.ctrl_card = card()
+        self.ctrl_card = panel()
         self.ctrl_card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self._build_controls(self.ctrl_card)
         rl.addWidget(self.ctrl_card)
         split.addWidget(right)
-        split.setSizes([560, 640])
+        sizes = self.s.get("ui.auto_split")
+        split.setSizes(sizes if isinstance(sizes, list) and len(sizes) == 2 else [560, 640])
+        split.splitterMoved.connect(lambda *_: self.s.set("ui.auto_split", split.sizes()))
         root.addWidget(split, 1)
 
         self._preview_timer = QTimer(self, singleShot=True, interval=350, timeout=self._render_preview)
-        sc = QShortcut(QKeySequence("Space"), self.table)
-        sc.setContext(Qt.WidgetWithChildrenShortcut)
-        sc.activated.connect(self.player.toggle)
         sc2 = QShortcut(QKeySequence("R"), self.table)
         sc2.setContext(Qt.WidgetWithChildrenShortcut)
         sc2.activated.connect(self._toggle_ready_current)
         hub.categoriesChanged.connect(self._fill_rules)
+        self.queue.changed.connect(self._queue_changed)
         self._fill_rules()
         self._fill_table()
         self._update_folder_lbl()
         self._show_item(None)
 
+    # ---- shared keys and theme ---------------------------------------------------
+    def key_play_pause(self) -> None:
+        self.player.toggle()
+
+    def _step(self, to: str) -> None:
+        n = self.table.rowCount()
+        if not n:
+            return
+        cur = self.table.currentRow()
+        row = {"prev": max(0, cur - 1), "next": min(n - 1, cur + 1), "first": 0, "last": n - 1}[to]
+        self.table.selectRow(row)
+
+    def key_prev(self) -> None:
+        self._step("prev")
+
+    def key_next(self) -> None:
+        self._step("next")
+
+    def key_first(self) -> None:
+        self._step("first")
+
+    def key_last(self) -> None:
+        self._step("last")
+
+    def set_panels_hidden(self, hide: bool) -> None:
+        for w in (self.toolbar, self.left, self.song_card, self.ctrl_card):
+            w.setVisible(not hide)
+
+    def theme_changed(self) -> None:
+        self.table.verticalHeader().setDefaultSectionSize(theme.T["rh"])
+        self.table.setStyleSheet("QTableWidget { border: none; border-top: 1px solid " + C["line"] + "; border-radius: 0; }")
+        self.bar._restyle()
+        self._fill_table()
+
+    def _queue_changed(self) -> None:
+        self.find_btn.setText("Add to the queue: find songs" if self.queue.busy() and self.job is None else "Find songs")
+
     # ---- controls -------------------------------------------------------------
     def _build_controls(self, box: QFrame) -> None:
         g = QGridLayout(box)
-        g.setContentsMargins(14, 12, 14, 12)
+        g.setContentsMargins(12, 10, 12, 10)
         g.setHorizontalSpacing(10)
         g.setVerticalSpacing(8)
         g.addWidget(label("Start the song at", "muted"), 0, 0)
@@ -207,7 +265,7 @@ class AutoMusicPage(QWidget):
         self.start_spin.setFixedWidth(90)
         self.start_spin.editingFinished.connect(lambda: self._set_offset(self.start_spin.value()))
         g.addWidget(self.start_spin, 0, 3)
-        smart = button("Smart start", "sparkle", color=C["teal"])
+        smart = button("Smart start", "sparkle", color=C["acc"])
         smart.setToolTip("Skip a quiet intro and start on a beat")
         smart.clicked.connect(self._smart_start)
         g.addWidget(smart, 0, 4)
@@ -235,7 +293,9 @@ class AutoMusicPage(QWidget):
         fades.addStretch(1)
         g.addLayout(fades, 2, 1, 1, 2)
 
-        g.addWidget(label("If the song is shorter", "muted"), 3, 0)
+        short_lbl = label("Song shorter", "muted")
+        short_lbl.setToolTip("What happens when the song is shorter than the video")
+        g.addWidget(short_lbl, 3, 0)
         self.mode = QComboBox()
         self.mode.addItem(f"Default: {SHORT_SONG_MODES[self.s.get('automusic.short_mode', 'chain')]}", None)
         for k, v in SHORT_SONG_MODES.items():
@@ -264,7 +324,7 @@ class AutoMusicPage(QWidget):
 
     # ---- folder / rules ---------------------------------------------------------
     def _update_folder_lbl(self) -> None:
-        self.folder_lbl.setText(self.folder or "Choose a folder of videos without sound")
+        self.folder_lbl.setText(self.folder or "")
         self.folder_lbl.setToolTip(self.folder)
 
     def choose_folder(self) -> None:
@@ -300,41 +360,31 @@ class AutoMusicPage(QWidget):
             if self.items:
                 hub.toast.emit("Press Find songs to re-match with this preference.", "info")
 
-    # ---- jobs -------------------------------------------------------------------
+    # ---- jobs (they go through the shared queue) ----------------------------------
     def _busy(self, on: bool, text: str = "") -> None:
-        if on:
-            self.task.start(text)
-        else:
-            self.task.finish()
-            self.task.setVisible(False)
-        self.stop_btn.setVisible(on)
-        self.find_btn.setEnabled(not on)
-        self.exp_all.setEnabled(not on)
-        self.exp_ready.setEnabled(not on)
-        self.exp_one.setEnabled(not on)
-
+        for w in (self.exp_all, self.exp_ready, self.exp_one):
+            w.setEnabled(not on)
 
     def find_songs(self) -> None:
         if not self.folder or not Path(self.folder).exists():
-            self.choose_folder() if not self.folder else hub.toast.emit("That folder no longer exists.", "warn")
+            self.choose_folder() if not self.folder else hub.toast.emit("That folder can't be reached.", "warn")
             return
-        if self.job:
+        if self.job is not None:
+            hub.toast.emit("Auto-music is already working on this folder.", "info")
             return
         self.player.unload()
-        self.job = workers.Job(find_songs_job, self.folder, bool(self.s.get("automusic.recursive")), self.items)
-        self.job.sig.progress.connect(lambda f, m: self.task.update(f, m))
-        self.job.sig.event.connect(self._event)
-        self.job.sig.done.connect(self._found)
-        self.job.sig.failed.connect(lambda e: (hub.toast.emit(e, "error"), self._job_done()))
-        self.job.sig.cancelled.connect(self._job_done)
-        self._busy(True, "Looking at the videos…")
-        workers.start(self.job)
+        self.job = self.queue.add("Matching songs to videos", find_songs_job, self.folder,
+                                  bool(self.s.get("automusic.recursive")), self.items, pausable=True, ai=True,
+                                  detail="Looking at the videos…", on_event=self._event, on_done=self._found,
+                                  on_failed=lambda e: hub.toast.emit(f"Matching stopped: {e}", "error"),
+                                  on_finished=self._job_done,
+                                  done_text=lambda items: f"{sum(1 for i in items if i.song_id)} videos have songs")
+        self._busy(True)
 
     def _found(self, items) -> None:
         self.items = items
         self._save()
         self._fill_table()
-        self._job_done()
         n = sum(1 for i in items if i.song_id)
         skipped = sum(1 for i in items if i.has_sound and not i.song_id)
         msg = f"Picked songs for {n} video{'s' if n != 1 else ''}."
@@ -348,6 +398,7 @@ class AutoMusicPage(QWidget):
         self.job = None
         self._busy(False)
         self._update_summary()
+        self._queue_changed()
 
     def _event(self, kind: str, payload) -> None:
         if kind == "warning":
@@ -360,21 +411,21 @@ class AutoMusicPage(QWidget):
         if not items:
             hub.toast.emit("Nothing to export yet.", "info")
             return
-        if self.job:
+        if self.job is not None:
+            hub.toast.emit("Wait for auto-music's current job to finish.", "info")
             return
         self.player.pause()
-        self.job = workers.Job(export_job, items)
-        self.job.sig.progress.connect(lambda f, m: self.task.update(f, f"Exporting {m}"))
-        self.job.sig.event.connect(self._event)
-        self.job.sig.done.connect(lambda res: self._exported(res))
-        self.job.sig.failed.connect(lambda e: (hub.toast.emit(e, "error"), self._job_done()))
-        self.job.sig.cancelled.connect(lambda: (self._save(), self._job_done()))
-        self._busy(True, "Exporting…")
-        workers.start(self.job)
+        n = len(items)
+        self.job = self.queue.add(f"Exporting {n} video{'s' if n != 1 else ''}", export_job, items, pausable=True,
+                                  detail="Starting…", on_event=self._event, on_done=self._exported,
+                                  on_failed=lambda e: hub.toast.emit(f"Export stopped: {e}", "error"),
+                                  on_stopped=self._save, on_finished=self._job_done,
+                                  done_text=lambda res: f"{sum(1 for i in res if i.status == 'exported')} exported "
+                                                        "next to the originals")
+        self._busy(True)
 
     def _exported(self, res) -> None:
         self._save()
-        self._job_done()
         ok = sum(1 for i in res if i.status == "exported")
         bad = len(res) - ok
         hub.toast.emit(f"Exported {ok} video{'s' if ok != 1 else ''} next to the originals."
@@ -400,7 +451,7 @@ class AutoMusicPage(QWidget):
 
     def _fill_row(self, i: int, it: am.AutoItem) -> None:
         rd = QTableWidgetItem()
-        rd.setIcon(icon("check", C["teal"], 16) if it.ready else icon("check", C["surface3"], 16))
+        rd.setIcon(icon("check", C["acc"], 15) if it.ready else icon("check", C["line2"], 15))
         rd.setToolTip("Click to mark ready")
         self.table.setItem(i, 0, rd)
         name = QTableWidgetItem(Path(it.video).name)
@@ -415,9 +466,9 @@ class AutoMusicPage(QWidget):
             if it.manual:
                 song.setIcon(icon("edit", C["muted"], 14))
         self.table.setItem(i, 3, song)
-        txt, col = STATUS_TXT.get(it.status, (it.status, C["muted"]))
+        txt, col = STATUS_TXT.get(it.status, (it.status, "sec"))
         st = QTableWidgetItem(txt)
-        st.setForeground(QColor(col))
+        st.setForeground(QColor(C.get(col, col)))
         if it.message:
             st.setToolTip(it.message)
         self.table.setItem(i, 4, st)
@@ -436,7 +487,7 @@ class AutoMusicPage(QWidget):
         r = sum(1 for i in self.items if i.ready)
         e = sum(1 for i in self.items if i.status == "exported")
         self.summary.setText(f"{n} videos · {m} with songs · {r} ready · {e} exported" if n else
-                             "Choose a folder and press Find songs.")
+                             "Choose a folder, then press Find songs.")
 
     def _cell_clicked(self, row: int, col: int) -> None:
         if col == 0 and 0 <= row < len(self.items):
@@ -501,14 +552,14 @@ class AutoMusicPage(QWidget):
                 for k, nm in (("length", "Length"), ("pace", "Pace"), ("mood", "Mood")):
                     parts.addWidget(chip(f"{nm} {sc[1][k] * 100:.0f}", C["violet"]))
                 if not it.features.get("mood"):
-                    parts.addWidget(chip("No mood (CLIP missing)", C["amber"]))
+                    parts.addWidget(chip("No mood (CLIP missing)", C["warn"]))
                 parts.addStretch(1)
                 self.song_lay.addLayout(parts)
         alts = [a for a in it.alts if a[0] != it.song_id][:5]
         if alts:
             self.song_lay.addWidget(label("Other good fits", "muted"))
-            al = QHBoxLayout()
-            al.setSpacing(6)
+            from .widgets import flow_row
+            box, al = flow_row(6)               # wraps instead of squashing the names
             for sid, sc in alts:
                 t = self._song_title(sid)
                 b = QPushButton(f"{t[:28]}{'…' if len(t) > 28 else ''}  {max(0, sc) * 100:.0f}")
@@ -517,8 +568,7 @@ class AutoMusicPage(QWidget):
                 b.setCursor(Qt.PointingHandCursor)
                 b.clicked.connect(lambda _=False, s=sid: self._pick(s))
                 al.addWidget(b)
-            al.addStretch(1)
-            self.song_lay.addLayout(al)
+            self.song_lay.addWidget(box)
         if it.status == "exported" and it.output:
             self.song_lay.addWidget(label(f"Exported: {Path(it.output).name}", "muted"))
         if it.status == "error" and it.message:

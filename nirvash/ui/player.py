@@ -57,7 +57,9 @@ class Player(QWidget):
     def __init__(self, parent=None, video: bool = True):
         super().__init__(parent)
         self.video_enabled = video
-        self.setStyleSheet("background:#05060a; border-radius: 10px;" if video else "")
+        if video:
+            self.setObjectName("stage")
+            self.setAttribute(Qt.WA_StyledBackground)
         self._b = _Bridge()
         self._b.pos.connect(self._on_pos)
         self._b.dur.connect(self._on_dur)

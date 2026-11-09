@@ -11,8 +11,8 @@ from PySide6.QtCore import (QAbstractTableModel, QEvent, QItemSelectionModel, QM
                             QSortFilterProxyModel, Qt, QTimer, Signal)
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
-                               QFormLayout, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QScrollArea,
+                               QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMenu, QPushButton, QScrollArea,
                                QSizePolicy, QSplitter, QStyle, QStyledItemDelegate, QTableView, QTextBrowser,
                                QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -23,12 +23,13 @@ from ..jobs import file_ops
 from ..jobs import scan as scanjob  # noqa: F401  (kept for callers that reset the fingerprint index)
 from ..jobs.library_files import to_recycle_bin
 from ..media.ff import fmt_time
-from . import theme, workers
+from . import dialogs, theme, workers
 from .hub import hub
+from .jobqueue import get_queue
 from .player import Player
 from .theme import C, CATEGORY_COLOURS, icon
-from .widgets import (PlayerBar, TaskProgress, button, card, chip, clear_layout, cover_pixmap, flow_row, label,
-                      open_in_explorer, open_with_default, tool)
+from .widgets import (PlayerBar, button, card, chip, clear_layout, cover_pixmap, flow_row, label, open_in_explorer,
+                      open_with_default, page_header, panel, tool)
 
 # (key, header). Hidden columns are saved by key, so adding columns never shuffles them.
 COLS = [("play", ""), ("fav", ""), ("title", "Title"), ("artist", "Artist"), ("length", "Length"),
@@ -37,23 +38,23 @@ COLS = [("play", ""), ("fav", ""), ("title", "Title"), ("artist", "Artist"), ("l
 KEYS = [k for k, _ in COLS]
 COL = {k: i for i, k in enumerate(KEYS)}
 OPTIONAL = KEYS[3:]                 # columns you can hide (Title always shows)
-STATUS = {
-    "pending": ("Identifying…", C["violet"]),
-    "not_found": ("Not identified", C["faint"]),
-    "error": ("Lookup failed", C["amber"]),
+STATUS = {                          # status -> (text, colour token, read when drawn so themes apply)
+    "pending": ("Identifying…", "violet"),
+    "not_found": ("Not identified", "faint"),
+    "error": ("Lookup failed", "warn"),
 }
 ROLE_SORT = Qt.UserRole + 1
 ROLE_ROW = Qt.UserRole + 2
 
 # Tri-state filters: key -> (label when on, label for the opposite, colour, test)
 FILTERS = {
-    "fav": ("Favourite", "Not favourite", C["amber"], lambda r: r["favourite"]),
-    "approved": ("Approved", "Not approved", C["green"], lambda r: r["approved"]),
-    "played": ("Played", "Never played", C["blue"], lambda r: r["played"]),
-    "identified": ("Identified", "Not identified", C["violet"], lambda r: r["identified"]),
-    "check": ("To check", "Nothing to check", C["pink"], lambda r: r["partial"] and not r["checked"]),
-    "linked": ("Linked to videos", "No video links", C["teal"], lambda r: bool(r["folders"])),
-    "tagged": ("Renamed & tagged", "Not renamed", C["muted"], lambda r: r["tagged"]),
+    "fav": ("Favourite", "Not favourite", "amber", lambda r: r["favourite"]),
+    "approved": ("Approved", "Not approved", "ok", lambda r: r["approved"]),
+    "played": ("Played", "Never played", "blue", lambda r: r["played"]),
+    "identified": ("Identified", "Not identified", "violet", lambda r: r["identified"]),
+    "check": ("To check", "Nothing to check", "warn", lambda r: r["partial"] and not r["checked"]),
+    "linked": ("Linked to videos", "No video links", "teal", lambda r: bool(r["folders"])),
+    "tagged": ("Renamed & tagged", "Not renamed", "sec", lambda r: r["tagged"]),
 }
 LISTENS = [("Listened through: any", None), ("Never listened through", ("eq", 0)), ("Listened once", ("eq", 1)),
            ("Listened twice", ("eq", 2)), ("Listened 3 times", ("eq", 3)), ("Listened 4 times", ("eq", 4)),
@@ -292,28 +293,32 @@ class LibraryFilter(QSortFilterProxyModel):
 
 
 def _pill(p: QPainter, opt, chips: list[tuple[str, str]]) -> None:
+    """20 px round tags with the colour on the text and border (DESIGN.md, Tags)."""
     p.save()
     p.setRenderHint(QPainter.Antialiasing)
     f = QFont(opt.font)
-    f.setPointSizeF(8.3)
-    f.setBold(True)
+    f.setPixelSize(11)
+    f.setWeight(QFont.DemiBold)
     p.setFont(f)
     x = opt.rect.x() + 6
-    h = 18
+    h = min(18, opt.rect.height() - 4)
     y = opt.rect.y() + (opt.rect.height() - h) // 2
     for text, col in chips:
-        w = p.fontMetrics().horizontalAdvance(text) + 16
+        col = C.get(col, col)
+        w = p.fontMetrics().horizontalAdvance(text) + 14
         if x + w > opt.rect.right() - 2:
             break
         qc = QColor(col)
         bg = QColor(qc)
-        bg.setAlpha(40)
-        p.setPen(Qt.NoPen)
+        bg.setAlpha(34)
+        bd = QColor(qc)
+        bd.setAlpha(140)
+        p.setPen(bd)
         p.setBrush(bg)
-        p.drawRoundedRect(QRect(x, y, w, h), 9, 9)
+        p.drawRoundedRect(QRect(x, y, w, h), h / 2, h / 2)
         p.setPen(qc)
         p.drawText(QRect(x, y, w, h), Qt.AlignCenter, text)
-        x += w + 5
+        x += w + 4
     p.restore()
 
 
@@ -338,9 +343,9 @@ class ChipDelegate(QStyledItemDelegate):
                     chips.append(self.m.cat_info[cid])
         else:
             if r["approved"]:
-                chips.append(("Approved", C["green"]))
+                chips.append(("Approved", "ok"))
             if r["partial"] and not r["checked"]:
-                chips.append(("Check", C["pink"]))
+                chips.append(("Check", "warn"))
             if r["status"] in STATUS:
                 chips.append(STATUS[r["status"]])
         _pill(p, opt, chips)
@@ -363,22 +368,23 @@ class PlayDelegate(QStyledItemDelegate):
         hover = bool(opt.state & QStyle.State_MouseOver)
         p.save()
         p.setRenderHint(QPainter.Antialiasing)
-        d = 24
+        d = max(14, min(20, opt.rect.height() - 4))
         rc = QRect(opt.rect.x() + (opt.rect.width() - d) // 2, opt.rect.y() + (opt.rect.height() - d) // 2, d, d)
         if cur or hover:
-            bg = QColor(C["teal"])
-            bg.setAlpha(255 if playing else 60)
+            bg = QColor(C["acc"])
+            bg.setAlpha(255 if playing else 55)
             p.setPen(Qt.NoPen)
             p.setBrush(bg)
             p.drawEllipse(rc)
-        col = "#0b0c14" if playing else (C["teal"] if (cur or hover) else C["muted"])
-        pm = theme.pixmap("pause" if playing else "play", 14, col)
-        p.drawPixmap(rc.x() + (d - 14) // 2 + (0 if playing else 1), rc.y() + (d - 14) // 2, 14, 14, pm)
+        col = C["on_acc"] if playing else (C["acc"] if (cur or hover) else C["sec"])
+        s = max(8, d - 10)
+        pm = theme.pixmap("pause" if playing else "play", s, col)
+        p.drawPixmap(rc.x() + (d - s) // 2 + (0 if playing else 1), rc.y() + (d - s) // 2, s, s, pm)
         p.restore()
 
 
 class TriChip(QPushButton):
-    """A filter that's off, on ('Approved') or the opposite ('Not approved'). Click to cycle."""
+    """A filter pill that's off, on ('Approved') or the opposite ('Not approved'). Click to cycle."""
 
     stateChanged = Signal(str, int)
 
@@ -394,59 +400,49 @@ class TriChip(QPushButton):
 
     def set_state(self, st: int, emit: bool = False) -> None:
         self.state = st
-        col = QColor(self.color if st == 1 else (C["red"] if st == 2 else C["muted"]))
-        rgba = f"rgba({col.red()},{col.green()},{col.blue()},{0.18 if st else 0})"
-        border = col.name() if st else C["border"]
+        acc = QColor(C["acc"] if st == 1 else C["danger"])
+        tint = f"rgba({acc.red()},{acc.green()},{acc.blue()},0.20)"
+        edge = f"rgba({acc.red()},{acc.green()},{acc.blue()},0.60)"
+        bg, bd, fg = (("transparent", C["line"], C["sec"]) if st == 0 else (tint, edge, C["text"]))
         self.setText({0: self.yes, 1: f"✓ {self.yes}", 2: f"✕ {self.no}"}[st].replace("&", "&&"))
-        self.setStyleSheet(f"QPushButton {{ background:{rgba}; color:{col.name() if st else C['muted']}; "
-                           f"border:1px solid {border}; border-radius:10px; padding:3px 11px; font-size:9pt; "
-                           f"font-weight:{600 if st else 400}; min-height:0; }}"
-                           f"QPushButton:hover {{ border-color:{col.name() if st else C['faint']}; color:"
-                           f"{col.name() if st else C['text']}; }}")
+        self.setStyleSheet(f"QPushButton {{ background:{bg}; color:{fg}; border:1px solid {bd}; border-radius:11px;"
+                           f" padding:0 10px; min-height:22px; max-height:22px; font-size:12px;"
+                           f" font-weight:{600 if st else 400}; }}"
+                           f"QPushButton:hover {{ border-color:{edge if st else C['line2']}; color:{C['text']}; }}")
         if emit:
             self.stateChanged.emit(self.key, st)
 
 
-class EditInfoDialog(QDialog):
+class EditInfoDialog(dialogs.Dialog):
     def __init__(self, row, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Edit song info")
-        self.setMinimumWidth(420)
-        lay = QVBoxLayout(self)
+        super().__init__(parent, "Edit song info", "Saved info isn't replaced by later lookups.", 440)
         form = QFormLayout()
+        form.setSpacing(6)
         self.fields = {}
         for key, name in (("title", "Title"), ("artist", "Artist"), ("album", "Album"), ("genre", "Genre"),
                           ("year", "Year")):
             e = QLineEdit(row[key] or "")
-            form.addRow(name, e)
+            form.addRow(label(name, "cap"), e)
             self.fields[key] = e
-        lay.addLayout(form)
-        note = label("Saved info isn't replaced by later lookups.", "muted")
-        lay.addWidget(note)
-        bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        lay.addWidget(bb)
+        self.body.addLayout(form)
+        self.add_button("Cancel", "cancel")
+        self.add_button("Save info", "primary")
 
     def values(self) -> dict:
         return {k: (e.text().strip() or None) for k, e in self.fields.items()}
 
 
-class LookupDialog(QDialog):
+class LookupDialog(dialogs.Dialog):
     """Pick which services to look songs up with this time."""
 
     def __init__(self, durations: list[float], parent=None):
-        super().__init__(parent)
+        n = len(durations)
+        super().__init__(parent, "Look up again", f"Look up {n} song{'s' if n != 1 else ''} again with:", 540)
         from ..jobs.identify import lookup_count
         self._count = lookup_count
         self.durs = durations
         self.s = get_settings()
-        n = len(durations)
-        self.setWindowTitle("Look up again")
-        self.setMinimumWidth(520)
-        lay = QVBoxLayout(self)
-        lay.setSpacing(8)
-        lay.addWidget(label(f"Look up {n} song{'s' if n != 1 else ''} again with:", "h2"))
+        lay = self.body
         self.boxes: dict[str, QCheckBox] = {}
 
         def add(key, text, hint, checked):
@@ -456,7 +452,7 @@ class LookupDialog(QDialog):
             lay.addWidget(b)
             if hint:
                 h = label(hint, "faint", wrap=True)
-                h.setContentsMargins(26, 0, 0, 4)
+                h.setContentsMargins(24, 0, 0, 2)
                 lay.addWidget(h)
             self.boxes[key] = b
             return b
@@ -468,26 +464,21 @@ class LookupDialog(QDialog):
         self.key = QLineEdit(self.s.get("identify.acoustid_key", ""))
         self.key.setPlaceholderText("AcoustID key - free from acoustid.org")
         add("acoustid", "AcoustID", "Free. Matches whole songs, so it rarely finds short clips.", False)
-        self.key.setContentsMargins(26, 0, 0, 0)
         lay.addWidget(self.key)
         self.tok = QLineEdit(self.s.get("identify.audiotag_key", ""))
         self.tok.setPlaceholderText("AudioTag key - free from audiotag.info (API → API keys)")
         self.tok.setEchoMode(QLineEdit.PasswordEchoOnEdit)
         add("audiotag", "AudioTag", "3 hours of audio a month free; uses 15 s per song (about 700 songs a month). "
             "Check what's left in Settings.", False)
-        self.tok.setContentsMargins(26, 0, 0, 0)
         lay.addWidget(self.tok)
         self.key.textChanged.connect(self._update)
         self.tok.textChanged.connect(self._update)
         self.est = label("", "muted", wrap=True)
         lay.addWidget(self.est)
-        bb = QDialogButtonBox()
-        self.ok = bb.addButton("Look up", QDialogButtonBox.AcceptRole)
-        self.ok.setObjectName("primary")
-        bb.addButton(QDialogButtonBox.Cancel)
-        bb.accepted.connect(self._accept)
-        bb.rejected.connect(self.reject)
-        lay.addWidget(bb)
+        self.add_button("Cancel", "cancel")
+        self.ok = self.add_button(f"Look up {n} song{'s' if n != 1 else ''}", "primary")
+        self.ok.clicked.disconnect()
+        self.ok.clicked.connect(self._accept)
         self._update()
 
     def methods(self) -> list[str]:
@@ -520,6 +511,8 @@ class LookupDialog(QDialog):
             secs = 15 * len(self.durs)
             txt += f" Uses up to {secs // 60:,} min of your AudioTag free time (3 hours a month)."
         self.est.setText(txt)
+        if self.isVisible():
+            self.adjustSize()
 
     def _accept(self) -> None:
         if self.boxes["acoustid"].isChecked():
@@ -531,31 +524,20 @@ class LookupDialog(QDialog):
         self.accept()
 
 
-class DeleteDialog(QDialog):
-    def __init__(self, text: str, n_videos: int, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Delete")
-        self.setMinimumWidth(440)
-        lay = QVBoxLayout(self)
-        lay.setSpacing(10)
-        lay.addWidget(label(text, "h2", wrap=True))
-        lay.addWidget(label("The files go to the Recycle Bin.", "muted"))
+class DeleteDialog(dialogs.Dialog):
+    def __init__(self, text: str, n_videos: int, n_songs: int = 1, parent=None):
+        super().__init__(parent, text, "The files go to the Recycle Bin.", 460)
         self.skip_videos = QCheckBox(f"Skip the video{'s' if n_videos != 1 else ''} they came from in future scans"
                                      + (f" ({n_videos})" if n_videos else ""))
         self.skip_videos.setChecked(True)
         self.skip_videos.setEnabled(n_videos > 0)
-        lay.addWidget(self.skip_videos)
+        self.body.addWidget(self.skip_videos)
         self.skip_songs = QCheckBox("Don't add the same music again if it turns up in other videos")
         self.skip_songs.setChecked(True)
-        lay.addWidget(self.skip_songs)
-        lay.addWidget(label("You can undo both in Settings → Reset → Skipped videos & songs.", "faint", wrap=True))
-        bb = QDialogButtonBox()
-        ok = bb.addButton("Delete", QDialogButtonBox.AcceptRole)
-        ok.setObjectName("danger")
-        bb.addButton(QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        lay.addWidget(bb)
+        self.body.addWidget(self.skip_songs)
+        self.body.addWidget(label("You can undo both in Settings → Reset → Skipped videos & songs.", "faint", wrap=True))
+        self.add_button("Cancel", "cancel")
+        self.add_button(f"Send {n_songs} song{'s' if n_songs != 1 else ''} to the Recycle Bin", "danger")
 
 
 def strip_lrc(text: str) -> str:
@@ -579,15 +561,15 @@ class DetailPanel(QScrollArea):
         self.page = page
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.NoFrame)
-        self.setMinimumWidth(300)
-        self.setMaximumWidth(420)
+        self.setMinimumWidth(260)
+        self.setMaximumWidth(460)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         inner = QWidget()
         inner.setObjectName("page")
         self.setWidget(inner)
         self.lay = QVBoxLayout(inner)
-        self.lay.setContentsMargins(4, 0, 4, 0)
-        self.lay.setSpacing(10)
+        self.lay.setContentsMargins(0, 0, 0, 0)
+        self.lay.setSpacing(8)
         self.sid: int | None = None
         self.play_btn: QPushButton | None = None
         self.lyrics_open = False
@@ -615,7 +597,7 @@ class DetailPanel(QScrollArea):
             return
         on = self.sid == self.page.playing_sid and self.page.player.is_playing()
         self.play_btn.setText("Pause" if on else "Play")
-        self.play_btn.setIcon(icon("pause" if on else "play", "#0b0c14"))
+        self.play_btn.setIcon(icon("pause" if on else "play", C["on_acc"], 15))
 
     def show_song(self, sid: int) -> None:
         db = get_db()
@@ -629,11 +611,11 @@ class DetailPanel(QScrollArea):
         clear_layout(self.lay)
         top = card()
         tl = QVBoxLayout(top)
-        tl.setContentsMargins(16, 16, 16, 16)
-        tl.setSpacing(8)
+        tl.setContentsMargins(12, 12, 12, 12)
+        tl.setSpacing(7)
         cover = QLabel()
         cpath = get_settings().cache("covers") / f"{sid}.jpg"
-        cover.setPixmap(cover_pixmap(str(cpath), 200, r["title"] or r["file_path"]))
+        cover.setPixmap(cover_pixmap(str(cpath), 168, r["title"] or r["file_path"], 8))
         cover.setAlignment(Qt.AlignCenter)
         tl.addWidget(cover)
         title = label(r["title"] or Path(r["file_path"]).stem, "h2", wrap=True)
@@ -642,9 +624,9 @@ class DetailPanel(QScrollArea):
             tl.addWidget(label(r["artist"], "muted", wrap=True))
         chips_w, chips = flow_row(5)
         if r["approved"]:
-            chips.addWidget(chip("Approved", C["green"]))
+            chips.addWidget(chip("Approved", C["ok"]))
         if r["partial"] and not r["checked"]:
-            chips.addWidget(chip("To check", C["pink"]))
+            chips.addWidget(chip("To check", C["warn"]))
         if r["genre"]:
             chips.addWidget(chip(r["genre"].split(",")[0], C["teal"]))
         if r["bpm"]:
@@ -670,7 +652,7 @@ class DetailPanel(QScrollArea):
                      color=C["amber"] if r["favourite"] else C["text"])
         fav.clicked.connect(lambda: self.page.toggle_fav([sid]))
         appr = button("Approved" if r["approved"] else "Approve", "badge",
-                      color=C["green"] if r["approved"] else C["text"])
+                      color=C["ok"] if r["approved"] else C["text"])
         appr.setToolTip("Approved = you've decided this song is fine to use. Click again to remove.")
         appr.clicked.connect(lambda: self.page.set_approved([sid], not r["approved"]))
         acts.addWidget(appr)
@@ -679,9 +661,9 @@ class DetailPanel(QScrollArea):
         catb.clicked.connect(lambda: self.page.category_menu([sid], catb))
         acts.addWidget(catb)
         more = QToolButton()
-        more.setText("More")
-        more.setIcon(icon("edit"))
-        more.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        more.setObjectName("menuBtn")
+        more.setText("More ▾")
+        more.setToolButtonStyle(Qt.ToolButtonTextOnly)
         more.setPopupMode(QToolButton.InstantPopup)
         mm = QMenu(more)
         self.page.fill_actions(mm, [sid])
@@ -689,7 +671,7 @@ class DetailPanel(QScrollArea):
         acts.addWidget(more)
         tl.addWidget(acts_w)
         if r["partial"] and not r["checked"]:
-            ok = button("Sounds fine — mark checked", "check", color=C["teal"])
+            ok = button("Sounds fine — mark checked", "check", color=C["acc"])
             ok.setToolTip("Marks it checked and approved")
             ok.clicked.connect(lambda: self.page.mark_checked([sid]))
             tl.addWidget(ok)
@@ -698,9 +680,9 @@ class DetailPanel(QScrollArea):
 
         info = card()
         il = QFormLayout(info)
-        il.setContentsMargins(16, 12, 16, 12)
-        il.setHorizontalSpacing(14)
-        il.setVerticalSpacing(6)
+        il.setContentsMargins(12, 10, 12, 10)
+        il.setHorizontalSpacing(12)
+        il.setVerticalSpacing(4)
 
         def row(name, val):
             if val:
@@ -723,7 +705,7 @@ class DetailPanel(QScrollArea):
         if r["sample_rate"]:
             codec += f" · {r['sample_rate'] / 1000:.1f} kHz"
         row("Audio", codec + " (copied, not re-encoded)")
-        fl = _link(Path(r["file_path"]).name, r["file_path"], C["teal"])
+        fl = _link(Path(r["file_path"]).name, r["file_path"], C["acc"])
         fl.setWordWrap(True)
         fl.setToolTip("Show the file in Explorer")
         fl.linkActivated.connect(lambda p: open_in_explorer(p))
@@ -747,7 +729,7 @@ class DetailPanel(QScrollArea):
         if srcs:
             sc = card()
             sl = QVBoxLayout(sc)
-            sl.setContentsMargins(16, 12, 16, 12)
+            sl.setContentsMargins(12, 10, 12, 10)
             sl.setSpacing(4)
             sl.addWidget(label(f"From {len(srcs)} video{'s' if len(srcs) > 1 else ''}", "h2"))
             for s in srcs[:12]:
@@ -759,7 +741,7 @@ class DetailPanel(QScrollArea):
                 rowl.addWidget(name, 1)
                 span = label(f"{fmt_time(s['start'])}–{fmt_time(s['end'])}", "muted")
                 rowl.addWidget(span)
-                pb = tool("play", "Open the video in your video player", C["teal"], 15)
+                pb = tool("play", "Open the video in your video player", C["acc"], 14)
                 pb.clicked.connect(lambda _=False, p=s["video_path"]: self.page.open_video(p))
                 rowl.addWidget(pb)
                 ob = tool("folder", "Show video in its folder", C["muted"], 15)
@@ -774,7 +756,7 @@ class DetailPanel(QScrollArea):
         if lyr:
             lc = card()
             ll = QVBoxLayout(lc)
-            ll.setContentsMargins(16, 12, 16, 12)
+            ll.setContentsMargins(12, 10, 12, 10)
             head = QHBoxLayout()
             head.addWidget(label("Lyrics", "h2"))
             head.addStretch(1)
@@ -784,8 +766,9 @@ class DetailPanel(QScrollArea):
             tb = QTextBrowser()
             tb.setPlainText(lyr)
             tb.setMinimumHeight(260)
-            tb.setVisible(self.lyrics_open)
             ll.addWidget(tb)
+            if not self.lyrics_open:
+                tb.hide()
 
             def flip():
                 self.lyrics_open = not tb.isVisible()
@@ -803,45 +786,54 @@ class LibraryPage(QWidget):
         self.setObjectName("page")
         self.model = LibraryModel(self)
         self.proxy = LibraryFilter(self.model, self)
-        self.batch: workers.Job | None = None
+        self.batch = None
         root = QVBoxLayout(self)
-        root.setContentsMargins(22, 18, 22, 14)
-        root.setSpacing(10)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(8)
 
-        head = QHBoxLayout()
-        head.addWidget(label("Song library", "h1"))
-        self.count_lbl = label("", "muted")
-        head.addWidget(self.count_lbl)
-        head.addStretch(1)
+        head, self.head_desc = page_header("Song library", "")
+        root.addLayout(head)
+
+        # Toolbar: search, the library's actions, then the filters
+        self.toolbar = panel()
+        tl = QVBoxLayout(self.toolbar)
+        tl.setContentsMargins(10, 8, 10, 8)
+        tl.setSpacing(8)
+        r1 = QHBoxLayout()
+        r1.setSpacing(8)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search title, artist, genre, mood, folder…   ( / )")
+        self.search.setClearButtonEnabled(True)
+        self.search.setMinimumWidth(240)
+        self.search.setMaximumWidth(380)
+        self.search.textChanged.connect(lambda t: (self.proxy.set(text=t.strip()), self._count()))
+        r1.addWidget(self.search, 1)
         self.lookup_btn = button("Look up unidentified", "refresh")
         self.lookup_btn.setToolTip("Look up every song that wasn't identified again - pick Shazam, AcoustID or AudioTag")
         self.lookup_btn.clicked.connect(self.lookup_unidentified)
-        head.addWidget(self.lookup_btn)
+        r1.addWidget(self.lookup_btn)
         self.sel_btn = QToolButton()
-        self.sel_btn.setText("Selected")
-        self.sel_btn.setIcon(icon("check"))
-        self.sel_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.sel_btn.setObjectName("menuBtn")
+        self.sel_btn.setText("Selected ▾")
+        self.sel_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.sel_btn.setPopupMode(QToolButton.InstantPopup)
         self.sel_btn.setToolTip("Actions for the selected songs (or right-click them)")
         self.sel_menu = QMenu(self.sel_btn)
         self.sel_menu.aboutToShow.connect(lambda: (self.sel_menu.clear(), self.fill_actions(self.sel_menu, self.selected())))
         self.sel_btn.setMenu(self.sel_menu)
-        head.addWidget(self.sel_btn)
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Search title, artist, genre, mood, folder…")
-        self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(300)
-        self.search.textChanged.connect(lambda t: (self.proxy.set(text=t.strip()), self._count()))
-        head.addWidget(self.search)
-        root.addLayout(head)
-
-        # Filter bar
+        r1.addWidget(self.sel_btn)
+        r1.addStretch(1)
+        self.play_btn = button("Play", "play", "primary")
+        self.play_btn.setToolTip("Play the selected song (Enter); Space pauses")
+        self.play_btn.clicked.connect(lambda: self.toggle_play(self.current()))
+        r1.addWidget(self.play_btn)
+        tl.addLayout(r1)
         fb = QHBoxLayout()
         fb.setSpacing(6)
-        fi = QLabel()
-        fi.setPixmap(theme.pixmap("filter", 15, C["faint"]))
-        fi.setToolTip("Filters combine. Click a filter once for yes, again for the opposite, again for off.")
-        fb.addWidget(fi)
+        fl = label("Filters", "cap")
+        fl.setFixedWidth(88)
+        fl.setToolTip("Filters combine. Click a filter once for yes, again for the opposite, again for off.")
+        fb.addWidget(fl)
         self.chips: dict[str, TriChip] = {}
         for k in FILTERS:
             c = TriChip(k, self)
@@ -853,49 +845,41 @@ class LibraryPage(QWidget):
             self.listen_box.addItem(text, val)
         self.listen_box.activated.connect(self._listens_changed)
         fb.addWidget(self.listen_box)
-        self.clear_btn = button("Clear filters", "x")
+        self.clear_btn = button("Clear filters", "x", "ghost")
         self.clear_btn.clicked.connect(self.clear_filters)
         self.clear_btn.setVisible(False)
         fb.addWidget(self.clear_btn)
         fb.addStretch(1)
-        root.addLayout(fb)
+        tl.addLayout(fb)
+        root.addWidget(self.toolbar)
 
-        # Progress for batch jobs (rename, unlink, delete)
-        self.task_row = QWidget()
-        trl = QHBoxLayout(self.task_row)
-        trl.setContentsMargins(0, 0, 0, 0)
-        self.task_title = label("", "h2")
-        trl.addWidget(self.task_title)
-        self.task = TaskProgress(compact=True)
-        trl.addWidget(self.task, 1)
-        self.task_cancel = button("Stop", "x")
-        self.task_cancel.clicked.connect(lambda: self.batch.cancel() if self.batch else None)
-        trl.addWidget(self.task_cancel)
-        self.task_row.setVisible(False)
-        root.addWidget(self.task_row)
-
-        split = QSplitter(Qt.Horizontal)
-        split.setHandleWidth(12)
-        # Sidebar: categories and the folders songs came from
-        side = QWidget()
+        self.split = split = QSplitter(Qt.Horizontal)
+        split.setHandleWidth(8)
+        split.setChildrenCollapsible(False)
+        # Side panel: categories and the folders songs came from
+        side = panel()
+        self.side = side
         sl = QVBoxLayout(side)
-        sl.setContentsMargins(0, 0, 0, 0)
-        sl.setSpacing(8)
+        sl.setContentsMargins(8, 8, 8, 8)
+        sl.setSpacing(4)
         ch = QHBoxLayout()
-        ch.addWidget(label("Categories", "h2"))
+        ch.addWidget(label("Categories", "cap"))
         ch.addStretch(1)
-        addc = tool("plus", "New category", C["teal"])
+        addc = tool("plus", "New category", C["acc"], 14)
         addc.clicked.connect(self.new_category)
         ch.addWidget(addc)
         sl.addLayout(ch)
         self.cat_list = QListWidget()
+        self.cat_list.setObjectName("sideList")
         self.cat_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.cat_list.customContextMenuRequested.connect(self._cat_menu)
         self.cat_list.currentItemChanged.connect(self._cat_changed)
         self.cat_list.setToolTip("Right-click a category to rename, recolour or delete it.")
         sl.addWidget(self.cat_list, 2)
-        sl.addWidget(label("Folders", "h2"))
+        sl.addSpacing(4)
+        sl.addWidget(label("Folders", "cap"))
         self.folder_tree = QTreeWidget()
+        self.folder_tree.setObjectName("sideList")
         self.folder_tree.setHeaderHidden(True)
         self.folder_tree.setColumnCount(2)
         self.folder_tree.setIndentation(14)
@@ -909,8 +893,7 @@ class LibraryPage(QWidget):
         self.folder_tree.customContextMenuRequested.connect(self._folder_menu)
         sl.addWidget(self.folder_tree, 3)
         self._folder_sig = None
-        side.setMinimumWidth(200)
-        side.setMaximumWidth(320)
+        side.setMinimumWidth(190)
         split.addWidget(side)
 
         # Table
@@ -924,7 +907,8 @@ class LibraryPage(QWidget):
         self.table.setShowGrid(False)
         self.table.setMouseTracking(True)
         self.table.verticalHeader().hide()
-        self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.verticalHeader().setMinimumSectionSize(18)
+        self.table.verticalHeader().setDefaultSectionSize(theme.T["rh"])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setWordWrap(False)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -933,6 +917,7 @@ class LibraryPage(QWidget):
         hh.setHighlightSections(False)
         hh.setStretchLastSection(False)
         hh.setSectionResizeMode(QHeaderView.Interactive)
+        hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         for k, w in self.WIDTHS.items():
             self.table.setColumnWidth(COL[k], w)
         for k in ("play", "fav"):
@@ -942,12 +927,14 @@ class LibraryPage(QWidget):
         hh.setSectionResizeMode(COL["artist"], QHeaderView.Stretch)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.table.setTextElideMode(Qt.ElideRight)
-        hh.setMinimumSectionSize(28)
+        hh.setMinimumSectionSize(24)
         hh.setContextMenuPolicy(Qt.CustomContextMenu)
         hh.customContextMenuRequested.connect(self._header_menu)
+        hh.sectionResized.connect(self._col_resized)
         self.user_hidden = self._load_hidden()
         self.auto_hidden: set[str] = set()
         self.table.viewport().installEventFilter(self)
+        self._restore_widths()
         self._apply_columns()
         # Delegates are children of the table and kept referenced (see ChipDelegate).
         self.chip_delegates = [ChipDelegate(self.model, "cats", self.table),
@@ -966,7 +953,9 @@ class LibraryPage(QWidget):
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
         split.setStretchFactor(2, 0)
-        split.setSizes([220, 920, 330])
+        sizes = get_settings().get("ui.library_split")
+        split.setSizes(sizes if isinstance(sizes, list) and len(sizes) == 3 else [230, 900, 292])
+        split.splitterMoved.connect(lambda *_: get_settings().set("ui.library_split", split.sizes()))
         root.addWidget(split, 1)
 
         self.player = Player(self, video=False)
@@ -978,15 +967,14 @@ class LibraryPage(QWidget):
         self.player.ended.connect(self._ended)
         self.player.playingChanged.connect(self._playing_changed)
 
-        for keys, fn in (("Space", self._space), ("Delete", lambda: self.delete(self.selected())),
-                         ("F", lambda: self.toggle_fav(self.selected())),
+        # Page keys (the shared ones - Space, arrows, / - come from the main window)
+        for keys, fn in (("Delete", lambda: self.delete(self.selected())),
+                         ("V", lambda: self.toggle_fav(self.selected())),
                          ("A", lambda: self.toggle_approved(self.selected())),
                          ("Return", lambda: self.play(self.current()))):
             sc = QShortcut(QKeySequence(keys), self.table)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
             sc.activated.connect(fn)
-        sc = QShortcut(QKeySequence("Ctrl+F"), self)
-        sc.activated.connect(self.search.setFocus)
 
         hub.songChanged.connect(self._song_changed)
         hub.songsReset.connect(self.reload)
@@ -994,6 +982,71 @@ class LibraryPage(QWidget):
         self._pending_refresh: set[int] = set()
         self._refresh_timer = QTimer(self, singleShot=True, interval=400, timeout=self._flush_refresh)
         self.reload()
+
+    # ---- shared keys and theme -------------------------------------------------
+    def focus_search(self) -> None:
+        self.search.setFocus()
+        self.search.selectAll()
+
+    def key_play_pause(self) -> None:
+        cur = self.current()
+        if self.playing_sid is None or (cur is not None and cur != self.playing_sid and not self.player.is_playing()):
+            if cur is not None:
+                self.play(cur)
+            return
+        self.player.toggle()
+
+    def _step(self, to: str) -> None:
+        n = self.proxy.rowCount()
+        if not n:
+            return
+        cur = self.table.currentIndex().row()
+        row = {"prev": max(0, cur - 1), "next": min(n - 1, cur + 1), "first": 0, "last": n - 1}[to]
+        idx = self.proxy.index(row, COL["title"])
+        self.table.selectionModel().setCurrentIndex(idx, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        self.table.scrollTo(idx)
+        if self.player.is_playing():
+            self.play(self._sid(idx))
+
+    def key_prev(self) -> None:
+        self._step("prev")
+
+    def key_next(self) -> None:
+        self._step("next")
+
+    def key_first(self) -> None:
+        self._step("first")
+
+    def key_last(self) -> None:
+        self._step("last")
+
+    def set_panels_hidden(self, hide: bool) -> None:
+        for w in (self.toolbar, self.side, self.detail):
+            w.setVisible(not hide)
+
+    def theme_changed(self) -> None:
+        self.table.verticalHeader().setDefaultSectionSize(theme.T["rh"])
+        for c in self.chips.values():
+            c.set_state(c.state)
+        self.bar._restyle()
+        self._reload_categories()
+        self.table.viewport().update()
+
+    def _col_resized(self, i: int, _old: int, new: int) -> None:
+        k = KEYS[i]
+        if k in ("title", "artist", "play", "fav") or new <= 0:
+            return
+        w = dict(get_settings().get("ui.library_widths") or {})
+        w[k] = new
+        get_settings().set("ui.library_widths", w)
+
+    def _restore_widths(self) -> None:
+        self.WIDTHS = dict(self.WIDTHS)
+        w = get_settings().get("ui.library_widths") or {}
+        for k, v in w.items():
+            if k in COL and isinstance(v, int) and v >= 24:
+                self.WIDTHS[k] = v
+                self.table.setColumnWidth(COL[k], v)
 
     # ---- data ---------------------------------------------------------------
     def reload(self) -> None:
@@ -1018,7 +1071,7 @@ class LibraryPage(QWidget):
         for cs in self.model.cats.values():
             for c in cs:
                 counts[c] = counts.get(c, 0) + 1
-        allit = QListWidgetItem(icon("library", C["teal"], 16), f"All songs   {len(self.model.rows)}")
+        allit = QListWidgetItem(icon("library", C["acc"], 15), f"All songs   {len(self.model.rows)}")
         allit.setData(Qt.UserRole, None)
         allit.setSizeHint(QSize(0, 30))
         self.cat_list.addItem(allit)
@@ -1089,7 +1142,7 @@ class LibraryPage(QWidget):
                 text = names[key]
             it = QTreeWidgetItem(parent, [text, str(counts[key])])
             it.setData(0, Qt.UserRole, key)
-            it.setIcon(0, icon("folder", C["amber"], 15))
+            it.setIcon(0, icon("folder", C["amber"], 14))
             it.setForeground(1, QColor(C["faint"]))
             it.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
             it.setToolTip(0, str(PurePath(*[names[key[:i + 1]] for i in range(len(key))])))
@@ -1101,7 +1154,7 @@ class LibraryPage(QWidget):
 
         allit = QTreeWidgetItem(tree, ["All folders", str(len(self.model.rows))])
         allit.setData(0, Qt.UserRole, None)
-        allit.setIcon(0, icon("library", C["teal"], 15))
+        allit.setIcon(0, icon("library", C["acc"], 14))
         allit.setForeground(1, QColor(C["faint"]))
         for k in sorted(children.get((), []), key=lambda x: names[x].casefold()):
             top = make(tree, k, names[k])
@@ -1169,7 +1222,10 @@ class LibraryPage(QWidget):
     def _count(self) -> None:
         total = len(self.model.rows)
         shown = self.proxy.rowCount()
-        self.count_lbl.setText(f"{total} songs" if shown == total else f"{shown} of {total} songs")
+        n_check = sum(1 for r in self.model.rows if r["partial"] and not r["checked"])
+        txt = f"{total:,} songs" if shown == total else f"{shown:,} of {total:,} songs"
+        self.head_desc.setText(txt + (f" · {n_check} to check" if n_check else "") +
+                               " · listen, check, tidy and tag the music found in your videos")
         n = self._unidentified_count()
         self.lookup_btn.setText(f"Look up unidentified ({n})")
         self.lookup_btn.setEnabled(n > 0)
@@ -1291,13 +1347,6 @@ class LibraryPage(QWidget):
             self.play(sid)
         self._repaint_play()
 
-    def _space(self) -> None:
-        cur = self.current()
-        if cur is not None and cur != self.playing_sid:
-            self.play(cur)
-        else:
-            self.player.toggle()
-
     def stop(self) -> None:
         self.player.pause()
 
@@ -1361,9 +1410,9 @@ class LibraryPage(QWidget):
             m.addAction(icon("play"), "Play", lambda: self.play(ids[0]))
         m.addAction(icon("star", C["amber"]), "Favourite / unfavourite", lambda: self.toggle_fav(ids))
         all_ok = rows and all(r["approved"] for r in rows)
-        m.addAction(icon("badge", C["green"]), "Remove approval" if all_ok else "Approve",
+        m.addAction(icon("badge", C["ok"]), "Remove approval" if all_ok else "Approve",
                     lambda: self.set_approved(ids, not all_ok))
-        m.addAction(icon("check", C["teal"]), "Sounds fine — mark checked", lambda: self.mark_checked(ids))
+        m.addAction(icon("check", C["acc"]), "Sounds fine — mark checked", lambda: self.mark_checked(ids))
         m.addAction(icon("tag"), "Categories…", lambda: self.category_menu(ids))
         m.addAction(icon("refresh"), "Look up again…", lambda: self.lookup(ids))
         m.addSeparator()
@@ -1377,14 +1426,14 @@ class LibraryPage(QWidget):
         if n == 1 and rows:
             r = rows[0]
             m.addAction(icon("edit"), "Edit info…", lambda: self.edit_info(ids[0]))
-            m.addAction(icon("play", C["teal"]), "Open in your music player",
+            m.addAction(icon("play", C["acc"]), "Open in your music player",
                         lambda p=r["file_path"]: self.open_file(p))
             m.addAction(icon("folder"), "Show file", lambda p=r["file_path"]: open_in_explorer(p))
             srcs = db.sources(ids[0])
             if srcs:
-                m.addAction(icon("film", C["teal"]), "Play source video", lambda p=srcs[0]["video_path"]: self.open_video(p))
+                m.addAction(icon("film", C["acc"]), "Play source video", lambda p=srcs[0]["video_path"]: self.open_video(p))
         m.addSeparator()
-        m.addAction(icon("trash", C["red"]), f"Delete {n} song{s}…", lambda: self.delete(ids))
+        m.addAction(icon("trash", C["danger"]), f"Delete {n} song{s}…", lambda: self.delete(ids))
 
     def toggle_fav(self, ids: list[int]) -> None:
         db = get_db()
@@ -1480,7 +1529,7 @@ class LibraryPage(QWidget):
                    "(length, BPM…). No file is ever overwritten, and the audio isn't changed.")
             if skipped:
                 txt += f"\n\n{skipped} unidentified song{'s are' if skipped > 1 else ' is'} left as they are."
-            if QMessageBox.question(self, "Rename & tag", txt) != QMessageBox.Yes:
+            if not dialogs.ask(self, "Rename & tag", txt, f"Rename {len(named)} file{'s' if len(named) > 1 else ''}"):
                 return
         self._run_batch(file_ops.rename_batch, named, "Renaming",
                         lambda res: f"Renamed and tagged {len(res['done'])} song{'s' if len(res['done']) != 1 else ''}.")
@@ -1497,7 +1546,7 @@ class LibraryPage(QWidget):
                    "• The file is renamed after the song (or “Unidentified song N” if it isn't identified)\n"
                    "• Any other info in the file is cleared\n"
                    "• Later scans never link it to a video again\n\nThis can't be undone.")
-            if QMessageBox.question(self, "Remove video links", txt) != QMessageBox.Yes:
+            if not dialogs.ask(self, "Remove video links", txt, "Remove the links", danger=True):
                 return
         self._run_batch(file_ops.unlink_batch, ids, "Removing video links",
                         lambda res: f"Removed the video links from {len(res['done'])} song"
@@ -1512,7 +1561,7 @@ class LibraryPage(QWidget):
         txt = (f"Delete “{rows[0]['title'] or Path(rows[0]['file_path']).stem}”?" if len(rows) == 1
                else f"Delete {len(rows)} songs?")
         n_videos = len({s["video_path"] for r in rows for s in db.sources(r["id"])})
-        d = DeleteDialog(txt, n_videos, self)
+        d = DeleteDialog(txt, n_videos, len(rows), self)
         if not d.exec():
             return None
         return d.skip_videos.isChecked() and n_videos > 0, d.skip_songs.isChecked()
@@ -1530,43 +1579,42 @@ class LibraryPage(QWidget):
                         skip_videos, skip_songs, lambda p: to_recycle_bin(p))
 
     def _run_batch(self, fn, ids: list[int], verb: str, done_text, *extra) -> None:
-        if self.batch is not None:
-            hub.toast.emit("Wait for the current job to finish first.", "warn")
-            return
+        """Rename / unlink / delete in the background. Joins the queue if something else is running."""
+        n = len(ids)
+
+        def started_check(*_a):
+            pass
+
         if self.playing_sid in ids:
             self.stop_playing()
-        job = workers.Job(fn, list(ids), *extra)
-        job.sig.progress.connect(lambda f, m: self.task.update(f, m))
-        job.sig.event.connect(lambda k, p: hub.songChanged.emit(int(p)) if k == "song_changed" else None)
-        job.sig.done.connect(lambda res: self._batch_done(res, done_text))
-        job.sig.failed.connect(lambda msg: (self.task.finish(f"Failed: {msg}"),
-                                            hub.toast.emit(f"{verb} failed: {msg}", "error")))
-        job.sig.cancelled.connect(lambda: (self.task.finish("Stopped"), hub.toast.emit(f"{verb} stopped.", "warn")))
-        job.sig.finished.connect(self._batch_finished)
-        self.task_title.setText(verb)
-        self.task_row.setVisible(True)
-        self.task_cancel.setEnabled(True)
-        self.task.start(f"{verb} {len(ids)} song{'s' if len(ids) != 1 else ''}…")
-        self.batch = workers.start(job)
+        q = get_queue()
+        self.batch = q.add(f"{verb} {n} song{'s' if n != 1 else ''}", fn, list(ids), *extra,
+                           on_event=lambda k, p: hub.songChanged.emit(int(p)) if k == "song_changed" else None,
+                           on_done=lambda res: self._batch_done(res, done_text),
+                           on_failed=lambda msg: hub.toast.emit(f"{verb} failed: {msg}", "error"),
+                           on_stopped=lambda: hub.toast.emit(f"Stopped {verb.lower()}. Finished songs are kept.", "warn"),
+                           on_finished=self._batch_finished,
+                           done_text=lambda res: done_text(res).rstrip("."), pausable=True)
+        if q.current is not self.batch:
+            hub.toast.emit(f"{verb} {n} song{'s' if n != 1 else ''} is queued after "
+                           f"{q.current.name.lower() if q.current else 'the current job'}.", "info")
 
     def _batch_done(self, res: dict, done_text) -> None:
         msg = done_text(res)
         fails = res.get("failed") or []
         if fails:
             msg += f" {len(fails)} couldn't be done: {fails[0][1]}" + (" (and others)" if len(fails) > 1 else "")
-        self.task.finish(msg)
         hub.toast.emit(msg, "warn" if fails else "ok")
+        hub.movesChanged.emit()
 
     def _batch_finished(self) -> None:
         self.batch = None
-        self.task_cancel.setEnabled(False)
-        QTimer.singleShot(6000, lambda: self.task_row.setVisible(self.batch is not None))
         self.reload()
 
     # ---- categories -----------------------------------------------------------
     def new_category(self) -> int | None:
-        name, ok = QInputDialog.getText(self, "New category", "Name:")
-        if not ok or not name.strip():
+        name = dialogs.ask_text(self, "New category", "Name:", ok="Add category")
+        if not name:
             return None
         db = get_db()
         n = len(db.categories())
@@ -1589,7 +1637,7 @@ class LibraryPage(QWidget):
             a.toggled.connect(lambda on, cid=c["id"]: self._set_cat(ids, cid, on))
         if db.categories():
             m.addSeparator()
-        m.addAction(icon("plus", C["teal"]), "New category…", lambda: self._new_and_add(ids))
+        m.addAction(icon("plus", C["acc"]), "New category…", lambda: self._new_and_add(ids))
         pos = anchor.mapToGlobal(anchor.rect().bottomLeft()) if anchor else self.cursor().pos()
         m.exec(pos)
 
@@ -1612,13 +1660,13 @@ class LibraryPage(QWidget):
         m.addAction(icon("edit"), "Rename…", lambda: self._rename_cat(cid))
         m.addAction(icon("tag"), "Change colour…", lambda: self._recolor_cat(cid))
         m.addSeparator()
-        m.addAction(icon("trash", C["red"]), "Delete category", lambda: self._delete_cat(cid))
+        m.addAction(icon("trash", C["danger"]), "Delete category", lambda: self._delete_cat(cid))
         m.exec(self.cat_list.mapToGlobal(pos))
 
     def _rename_cat(self, cid: int) -> None:
         cur = next((c["name"] for c in get_db().categories() if c["id"] == cid), "")
-        name, ok = QInputDialog.getText(self, "Rename category", "Name:", text=cur)
-        if ok and name.strip():
+        name = dialogs.ask_text(self, "Rename category", "Name:", cur, ok="Rename")
+        if name:
             try:
                 get_db().rename_category(cid, name.strip())
             except Exception:
@@ -1633,7 +1681,9 @@ class LibraryPage(QWidget):
             hub.categoriesChanged.emit()
 
     def _delete_cat(self, cid: int) -> None:
-        if QMessageBox.question(self, "Delete category", "Delete this category? Songs stay in the library.") == QMessageBox.Yes:
+        nm = next((c["name"] for c in get_db().categories() if c["id"] == cid), "this category")
+        if dialogs.ask(self, "Delete category", f"Delete the category “{nm}”? Its songs stay in the library.",
+                       "Delete category", danger=True):
             get_db().delete_category(cid)
             if self.proxy.category == cid:
                 self.proxy.set(category=None)

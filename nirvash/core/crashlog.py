@@ -14,10 +14,16 @@ _keep: list = []   # keeps the file and the C callback alive for the life of the
 
 
 def install(log_dir) -> None:
+    """Crashes go to logs/crash-<date>.txt, one file per day; empty ones from earlier days are tidied away."""
+    today = log_dir / f"crash-{time.strftime('%Y-%m-%d')}.txt"
+    for f in log_dir.glob("crash-*.txt"):
+        try:
+            if f != today and f.stat().st_size == 0:
+                f.unlink()
+        except OSError:
+            pass
     try:
-        fh = open(log_dir / "crash.log", "a", encoding="utf-8")
-        fh.write(f"\n=== started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
-        fh.flush()
+        fh = open(today, "a", encoding="utf-8")
     except Exception:
         return
     _keep.append(fh)
@@ -63,8 +69,8 @@ def _install_windows(fh) -> None:
                 buf = ctypes.create_unicode_buffer(520)
                 k32.GetModuleFileNameW(h, buf, 520)
                 mod, off = buf.value, addr - (h.value or 0)
-            fh.write(f"Fatal exception 0x{rec.ExceptionCode:08x} in {mod} +0x{off:x} "
-                     f"at {time.strftime('%H:%M:%S')}\n")
+            fh.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} Nirvash crashed ===\n"
+                     f"Fatal exception 0x{rec.ExceptionCode:08x} in {mod} +0x{off:x}\n")
             fh.flush()
             faulthandler.dump_traceback(file=fh, all_threads=True)
             fh.flush()

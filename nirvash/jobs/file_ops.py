@@ -190,7 +190,7 @@ def _same_audio(before: ff.Probe, after_path: Path) -> bool:
     return abs((before.duration or 0) - (after.duration or 0)) <= 0.25
 
 
-def rename_and_tag(sid: int, stem: str | None = None, with_info: bool = True) -> Path:
+def rename_and_tag(sid: int, stem: str | None = None, with_info: bool = True, action: str = "Renamed") -> Path:
     """Rename the song's file to `stem` (default: its song name) and write its tags. Updates the library."""
     db = get_db()
     r = db.song(sid)
@@ -204,7 +204,40 @@ def rename_and_tag(sid: int, stem: str | None = None, with_info: bool = True) ->
     dst = target_path(src, stem)
     _rename(src, dst)
     db.update_song(sid, file_path=str(dst), tagged=int(tagged and bool(r["title"]) and with_info))
+    if dst != src:
+        db.log_move(action, str(src), str(dst), sid,
+                    "Song info written into the file" if tagged else "")
     return dst
+
+
+def undo_move(mid: int) -> str:
+    """Put a renamed or moved file back. Returns what happened, in plain words."""
+    db = get_db()
+    m = db.move(mid)
+    if m is None:
+        return "That entry isn't in the move log any more."
+    if m["undone"]:
+        return "That was already undone."
+    src, dst = Path(m["src"]), Path(m["dst"])
+    if not dst.exists():
+        return f"{dst.name} was moved or deleted outside Nirvash, so it can't be undone."
+    if src.exists() and str(src).casefold() != str(dst).casefold():
+        return f"There's already a file called {src.name} there, and Nirvash never overwrites files."
+    if not paths_ok(src):
+        return f"The folder {src.parent} can't be reached."
+    src.parent.mkdir(parents=True, exist_ok=True)
+    _rename(dst, src)
+    if m["song_id"] is not None and db.song(m["song_id"]) is not None:
+        db.update_song(m["song_id"], file_path=str(src))
+    db.mark_undone(mid)
+    log.info("undid %s: %s -> %s", m["action"], dst.name, src.name)
+    extra = " The song info written into it stays." if m["note"] else ""
+    return f"Put {src.name} back.{extra}"
+
+
+def paths_ok(p: Path) -> bool:
+    from ..core.paths import drive_ok
+    return drive_ok(p)
 
 
 def unlink_videos(sid: int, stem: str | None = None) -> Path:
@@ -213,7 +246,7 @@ def unlink_videos(sid: int, stem: str | None = None) -> Path:
     db = get_db()
     db.remove_sources(sid)
     db.update_song(sid, unlinked=1)
-    return rename_and_tag(sid, stem)
+    return rename_and_tag(sid, stem, action="Renamed (video links removed)")
 
 
 # ---------------------------------------------------------------------------

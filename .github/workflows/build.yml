@@ -37,7 +37,8 @@ jobs:
         shell: pwsh
         run: |
           $env:PATH = "$PWD\bin;$env:PATH"
-          python -m pytest -q tests/test_pipeline.py tests/test_download.py tests/test_ui_flows.py tests/test_processes.py tests/test_ownership.py tests/test_library_ops.py tests/test_library_ui.py
+          $env:NIRVASH_AUTO_DIALOGS = "accept"
+          python -m pytest -q tests/test_pipeline.py tests/test_download.py tests/test_ui_flows.py tests/test_processes.py tests/test_ownership.py tests/test_library_ops.py tests/test_library_ui.py tests/test_shell.py
 
       - name: Cache AI models
         uses: actions/cache@v4
@@ -88,23 +89,31 @@ jobs:
           Compress-Archive -Path out/Nirvash -DestinationPath "Nirvash.zip" -CompressionLevel Optimal
           Get-Item "Nirvash.zip" | Select-Object Name, Length
 
-      # Builds go to a GitHub release (no storage quota), not to Actions artifacts.
-      - name: Point the "latest" tag at this build
+      # Numbered releases (STANDARDS.md): each version gets its own tag and release, kept for going back.
+      # Pushing again without a new version replaces that version's zip. The newest is always at
+      # https://github.com/Sezekai/nirvash/releases/latest/download/Nirvash.zip
+      - name: Tag this version
         if: github.event_name != 'release'
+        shell: pwsh
         run: |
-          git tag -f latest
-          git push -f origin latest
+          $tag = "v${{ steps.pkg.outputs.version }}"
+          git tag -f $tag
+          git push -f origin $tag
+          # the old rolling "latest" release is replaced by numbered ones
+          gh release delete latest --yes --cleanup-tag 2>$null; $global:LASTEXITCODE = 0
 
-      - name: Publish latest build
+      - name: Publish this version
         if: github.event_name != 'release'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: Nirvash ${{ steps.pkg.outputs.version }} (build ${{ github.run_number }})
+          tag_name: v${{ steps.pkg.outputs.version }}
+          name: Nirvash ${{ steps.pkg.outputs.version }}
           body: |
-            Latest build of `main` (${{ github.sha }}).
+            Nirvash ${{ steps.pkg.outputs.version }} (build ${{ github.run_number }}, ${{ github.sha }}).
             Extract `Nirvash.zip` into `E:\Pictures` so the program sits at `E:\Pictures\Nirvash\App\Nirvash.exe`.
+            Your settings, library and models are kept: they live outside the App folder.
           files: Nirvash.zip
+          overwrite_files: true
           make_latest: true
 
       - name: Attach to release

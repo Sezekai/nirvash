@@ -64,6 +64,7 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
     from nirvash.ui.main_window import MainWindow
     monkeypatch.setattr(MainWindow, "_check_models", lambda self: None)
+    monkeypatch.setenv("NIRVASH_AUTO_DIALOGS", "accept")
     yield a
 
 
@@ -92,12 +93,15 @@ def test_find_music_auto_music_and_library(app, tmp_path):
     # --- Find music: same path as pressing the button
     get_settings().set("ui.last_scan_folders", [str(src)])
     page = w.scan_page
-    page.folders.clear()
-    page._folder_item(str(src))
+    for f in page._folders():
+        page.remove_folder(f)
+    page._folder_chip(str(src))
     page.start()
-    assert wait_for(app, lambda: page.job is None), "scan didn't finish"
-    assert page.counts["videos"] == 1 and page.counts["added"] == 1, (page.counts, page.task.detail.text())
-    assert "Stopped" not in page.task.detail.text(), page.task.detail.text()
+    assert wait_for(app, lambda: not w.queue.busy()), "scan didn't finish"
+    last = w.queue.last
+    assert last.state == "done", last.result_text
+    assert page.counts["videos"] == 1 and page.counts["added"] == 1, (page.counts, last.result_text)
+    assert last.result_text.startswith("Finished"), last.result_text
     songs = get_db().songs()
     assert len(songs) == 1 and Path(songs[0]["file_path"]).exists()
     sid = songs[0]["id"]
@@ -137,7 +141,7 @@ def test_find_music_auto_music_and_library(app, tmp_path):
     srcs = [x["video_path"] for x in get_db().sources(sid)]
     lib.ask_delete = lambda ids: (True, True)
     lib.delete([sid])
-    assert wait_for(app, lambda: lib.batch is None), "delete didn't finish"
+    assert wait_for(app, lambda: not w.queue.busy() and lib.batch is None), "delete didn't finish"
     assert get_db().song(sid) is None and binned
     assert {v.lower() for v in srcs} <= get_db().ignored_videos()
     assert get_db().ignore_counts()[1] == 1

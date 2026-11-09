@@ -93,9 +93,7 @@ from nirvash.ui import theme  # noqa: E402
 
 app = QApplication(sys.argv)
 app.setStyle("Fusion")
-theme.apply_font(app)
-theme.check_svg_resource()
-app.setStyleSheet(theme.fixed_stylesheet())
+theme.apply(app)
 from nirvash.ui.main_window import MainWindow  # noqa: E402
 
 MainWindow._check_models = lambda self: None
@@ -142,26 +140,57 @@ def shoot():
             print(f"B64END {n}")
     w.library.select_song(1)
     app.processEvents()
-    for key in ("library", "scan", "auto", "settings"):
-        w.go(key)
-        if key == "auto":
-            w.auto_page.table.selectRow(0)
-        for _ in range(20):
+
+    def snap(name):
+        for _ in range(25):
             app.processEvents()
-        w.grab().save(str(OUT / f"{key}.png"))
+        w.grab().save(str(OUT / f"{name}.png"))
+
+    for width, height in ((1100, 720), (1440, 900), (1920, 1040)):
+        w.resize(width, height)
+        for key in ("library", "scan", "auto", "settings", "look", "keys"):
+            w.go(key)
+            if key == "auto":
+                w.auto_page.table.selectRow(0)
+            snap(f"{key}_{width}")
+    w.resize(1440, 900)
     w.go("library")
-    w.resize(1900, 1000)
     w.library.set_filter("approved", 1)
-    w.library.set_filter("identified", 2) if False else None
     w.library.set_filter("played", 2)
-    for _ in range(20):
-        app.processEvents()
-    w.grab().save(str(OUT / "library_filtered.png"))
+    snap("library_filtered")
     w.library.clear_filters()
-    w.resize(1480, 900)
+    # a job running in the status bar, with one more queued
+    import time as _t
+    from nirvash.ui.jobqueue import get_queue
+
+    def slow(ctx, n):
+        for i in range(n):
+            ctx.check()
+            ctx.progress(i / n, f"Video {i + 1} of {n} · beach walk.mp4")
+            _t.sleep(0.05)
+
+    get_queue().add("Finding music", slow, 400, pausable=True, ai=True)
+    get_queue().add("Exporting", slow, 10)
+    wait(1.5)
+    snap("job_running")
+    w.toggle_log(True)
+    snap("log_open")
+    w.toggle_log(True, "moves")
+    snap("moves_open")
+    w.toggle_log(False)
+    get_queue().stop_all()
+    wait(0.5)
+    snap("job_stopped")
     w.toast.show_msg("Exported 2 videos next to the originals.", "ok")
-    app.processEvents()
-    w.grab().save(str(OUT / "toast.png"))
+    snap("toast")
+    # a light theme and a plain dark one
+    from nirvash.core import appearance as ap
+    for bg in ("daylight", "obsidian"):
+        theme.apply(app, ap.with_background(None, bg))
+        from nirvash.ui.hub import hub
+        hub.themeChanged.emit()
+        w.go("library")
+        snap(f"theme_{bg}")
     print("saved to", OUT)
     app.quit()
 

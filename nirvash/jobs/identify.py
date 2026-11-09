@@ -261,6 +261,10 @@ class IdentifyQueue:
     def poke(self) -> None:
         self._wake.set()
 
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
     def pause(self, paused: bool) -> None:
         self._paused = paused
         if not paused:
