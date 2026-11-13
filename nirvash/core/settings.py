@@ -24,6 +24,7 @@ DEFAULTS: dict[str, Any] = {
         "overlays": "",
         "models": "",
         "cache": "",
+        "originals": "",
     },
     "export": {
         "suffix": "_edited",
@@ -47,6 +48,12 @@ DEFAULTS: dict[str, Any] = {
         "musicbrainz": True,
         "itunes": True,
         "lyrics": True,
+    },
+    "level": {
+        "auto": True,               # even out songs that are much louder or quieter than the rest
+        "target": -14.0,            # loudness every song is brought towards (LUFS)
+        "tolerance": 2.0,           # songs this close to the target are left untouched
+        "max_gain": 12.0,           # never change a song by more than this (dB)
     },
     "automusic": {
         "short_mode": "chain",
@@ -147,6 +154,7 @@ class Settings:
                 "overlays": self.root() / "Library" / "Overlays",
                 "models": self.root() / "Models",
                 "cache": self.root() / "Cache",
+                "originals": self.root() / "Library" / "Originals",
             }
             p = defaults[key]
         return paths.ensure(p)

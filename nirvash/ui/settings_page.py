@@ -67,6 +67,7 @@ class SettingsPage(QWidget):
         right = QVBoxLayout()
         right.setSpacing(8)
         left.addWidget(self._identify_card())
+        left.addWidget(self._level_card())
         left.addWidget(self._auto_card())
         left.addWidget(self._scan_export_card())
         left.addStretch(1)
@@ -299,6 +300,55 @@ class SettingsPage(QWidget):
         hub.toast.emit(f"Queued {n} song{'s' if n != 1 else ''} for another lookup.", "ok")
 
     # ---- auto-music -----------------------------------------------------------------------
+    def _level_card(self) -> QFrame:
+        c, l = self._section("Song volume", "Evens out songs that are much louder or quieter than the rest")
+        self._toggle_row(l, "Even out loud and quiet songs automatically (after each scan)", "level.auto",
+                         "Songs more than the allowance away from the target are made louder or quieter. The file "
+                         "itself changes, so it plays the same in any player; the original is kept.")
+        g = QGridLayout()
+        g.setHorizontalSpacing(8)
+        g.setVerticalSpacing(6)
+        tgt = self._spin("level.target", -24, -8, 0.5, " LUFS")
+        tgt.setToolTip("-14 LUFS is what most music apps play at. Lower is quieter.")
+        tol = self._spin("level.tolerance", 0.5, 6, 0.5, " dB")
+        tol.setToolTip("Songs this close to the target are left untouched (nothing re-encoded)")
+        for col, (name, w) in enumerate((("Target loudness", tgt), ("Leave alone within", tol))):
+            lb = label(name, "cap")
+            if col == 0:
+                lb.setFixedWidth(120)
+            g.addWidget(lb, 0, col * 2)
+            g.addWidget(w, 0, col * 2 + 1)
+        g.setColumnStretch(4, 1)
+        l.addLayout(g)
+        r = QHBoxLayout()
+        b = button("Even out the whole library now", "volume")
+        b.setToolTip("Measures every song again and evens out the ones away from the target, "
+                     "including songs whose volume you set by hand")
+        b.clicked.connect(self._level_all)
+        r.addWidget(b)
+        r.addStretch(1)
+        l.addLayout(r)
+        l.addWidget(label("Trim, volume and re-cut a single song: right-click it in the library (or press E).", "faint",
+                          wrap=True))
+        return c
+
+    def _level_all(self) -> None:
+        from ..core.db import get_db
+        from ..jobs import audio_edit as ae
+        from . import dialogs
+        from .hub import hub
+        ids = [r["id"] for r in get_db().q("SELECT id FROM songs ORDER BY id")]
+        if not ids:
+            hub.toast.emit("The library is empty.", "info")
+            return
+        if not dialogs.ask(self, f"Even out all {len(ids)} songs?",
+                           "Every song is measured; the ones well away from the target are made louder or quieter. "
+                           "Originals are kept, so any song can go back.", "Even out the library"):
+            return
+        self.queue.add(f"Evening out {len(ids)} songs", ae.level_songs, ids, ae._is_playing, True, pausable=True,
+                       on_event=lambda k, p: hub.songChanged.emit(int(p)) if k == "song_changed" else None,
+                       done_text=lambda res: f"{res['changed']} of {res['measured']} songs changed")
+
     def _auto_card(self) -> QFrame:
         c, l = self._section("Auto-music defaults", "Used for every video unless you change it there")
         r = self._field_row(l, "Shorter song")

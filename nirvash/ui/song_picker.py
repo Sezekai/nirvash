@@ -128,11 +128,12 @@ class SongPicker(QDialog):
         return it.data(Qt.UserRole + 1) if it else None
 
     def _preview(self, row: int) -> None:
+        from .library_page import wave_key
         sid = self._sid(row)
         r = get_db().song(sid) if sid is not None else None
         if r is None:
             return
-        self.bar.load(r["file_path"], f"song{sid}-{int(r['duration'] * 1000)}", r["duration"],
+        self.bar.load(r["file_path"], wave_key(r), r["duration"],
                       r["title"] or Path(r["file_path"]).stem, play=True)
 
     def _use(self) -> None:

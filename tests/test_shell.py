@@ -237,6 +237,7 @@ def test_second_copy_brings_the_first_forward(app):
 
 # ---- shell keys and panels ------------------------------------------------------------------------
 def test_shell_keys(app):
+    from PySide6.QtCore import Qt
     from nirvash.ui.main_window import MainWindow
     w = MainWindow()
     w.identify.stop()
@@ -252,7 +253,26 @@ def test_shell_keys(app):
     w.toggle_rail()
     assert not w.rail.isVisible()
     w.toggle_rail()
-    for k in ("look", "keys", "settings", "scan", "auto", "editor", "library"):
+    # K opens the shortcuts over the current screen; K, Esc or a click outside closes it
+    w.go("scan")
+    w.toggle_keys()
+    assert w.keys_popup.isVisible() and w.current_page() is w.scan_page
+    w._escape()
+    assert not w.keys_popup.isVisible()
+    w.toggle_keys()
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+    QTest.mouseClick(w.keys_popup, Qt.LeftButton, pos=QPoint(3, 3))
+    assert not w.keys_popup.isVisible()
+    for size, cols in (((1920, 1040), 1), ((1100, 700), 2)):
+        w.resize(*size)
+        w.toggle_keys()
+        app.processEvents()
+        card = w.keys_popup.card.geometry()
+        assert w.keys_popup.rect().contains(card), (size, card)
+        assert w.keys_popup.columns >= cols, (size, w.keys_popup.columns)
+        w.toggle_keys()
+    for k in ("look", "settings", "scan", "auto", "editor", "library"):
         w.go(k)
         app.processEvents()
     # an error opens the log by itself
@@ -301,3 +321,45 @@ def test_windows_frame(app):  # pragma: no cover - Windows only
     g = w.geometry()
     assert abs(g.width() - avail.width()) <= 2 and g.top() >= avail.top() - 1, (g, avail)
     w.close()
+
+
+def test_row_click_volume_keys_delete_default(app, monkeypatch):
+    from PySide6.QtCore import QModelIndex
+    from nirvash.ui.library_page import COL, DeleteDialog, LibraryPage
+    page = LibraryPage()
+    # the "don't add the same music again" box starts off; skipping the videos stays on
+    d = DeleteDialog("x", 2, page)
+    assert not d.skip_songs.isChecked() and d.skip_videos.isChecked()
+    d.done(0)
+    # a plain click on the playing song's row pauses it; on its already-chosen row again carries on
+    calls = []
+    state = {"on": True}
+    monkeypatch.setattr(page.player, "is_playing", lambda: state["on"])
+    monkeypatch.setattr(page.player, "pause", lambda: (calls.append("pause"), state.update(on=False)))
+    monkeypatch.setattr(page.player, "play", lambda: (calls.append("play"), state.update(on=True)))
+    page.playing_sid = 7
+    monkeypatch.setattr(page, "_sid", lambda idx: 7)
+    idx = QModelIndex()
+    monkeypatch.setattr(idx.__class__, "column", lambda self: COL["title"])
+    page._row_was_current = False
+    page._clicked(idx)
+    assert calls == ["pause"]
+    page._clicked(idx)                   # first click only chose the row: no resume
+    assert calls == ["pause"]
+    page._row_was_current = True
+    page._clicked(idx)
+    assert calls == ["pause", "play"]
+    monkeypatch.undo()
+    # - and = change the volume by 5, 0 mutes
+    bar = page.bar
+    bar.vol.setValue(50)
+    page.key_volume_up()
+    assert bar.vol.value() == 55
+    page.key_volume_down()
+    page.key_volume_down()
+    assert bar.vol.value() == 45
+    page.key_mute()
+    assert bar.muted and bar.vol.value() == 45
+    page.key_volume_up()                 # changing the volume unmutes
+    assert not bar.muted and bar.vol.value() == 50
+    page.close()

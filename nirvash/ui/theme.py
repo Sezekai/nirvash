@@ -113,6 +113,8 @@ QLabel#warnText {{ color: {c['warn']}; }}
 QLabel#dangerText {{ color: {c['danger']}; }}
 QLabel#okText {{ color: {c['ok']}; }}
 QLabel#mono {{ font-family: "JetBrains Mono", Consolas; font-size: {fs - 1}px; color: {c['sec']}; }}
+QLabel#keycap {{ font-family: "JetBrains Mono", Consolas; font-size: {fs - 2}px; color: {c['text']}; background: {c['raised']};
+    border: 1px solid {c['line2']}; border-radius: 4px; padding: 1px 6px; }}
 QFrame#card, QFrame#panel {{ background: {surf('panel')}; border: 1px solid {c['line']}; border-radius: {rp}px; }}
 QFrame#card2 {{ background: {surf('raised', 0.15)}; border: 1px solid {c['line']}; border-radius: {rc + 2}px; }}
 QFrame#card2[chosen="true"] {{ border-color: {acc}; }}
@@ -408,6 +410,7 @@ _P = {
     "edit": '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
     "export": '<path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>',
     "shuffle": '<path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/>',
+    "mute": '<path d="M11 5 6 9H2v6h4l5 4z" fill="currentColor"/><path d="m16 9 6 6M22 9l-6 6"/>',
     "volume": '<path d="M11 5 6 9H2v6h4l5 4z" fill="currentColor"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/>',
     "open": '<path d="M15 3h6v6M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
     "unlink": '<path d="m18.84 12.25 1.72-1.71a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="m5.17 11.75-1.71 1.71a5 5 0 0 0 7.07 7.07l1.71-1.71"/><path d="M8 2v3M2 8h3M16 22v-3M22 16h-3"/>',

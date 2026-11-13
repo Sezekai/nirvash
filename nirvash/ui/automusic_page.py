@@ -211,6 +211,15 @@ class AutoMusicPage(QWidget):
         self._show_item(None)
 
     # ---- shared keys and theme ---------------------------------------------------
+    def key_volume_up(self) -> None:
+        self.bar.nudge_volume(5)
+
+    def key_volume_down(self) -> None:
+        self.bar.nudge_volume(-5)
+
+    def key_mute(self) -> None:
+        self.bar.toggle_mute()
+
     def key_play_pause(self) -> None:
         self.player.toggle()
 

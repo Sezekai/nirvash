@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 import sys
 
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
@@ -68,6 +69,8 @@ class Player(QWidget):
         self._b.eof.connect(self.ended.emit)
         self._b.loaded.connect(self._on_loaded)
         self._pos = 0.0
+        self._last_pos_emit = 0.0
+        self._last_pos_val = 0.0
         self._dur = 0.0
         self._volume = 80
         self._want_play = False
@@ -297,6 +300,18 @@ class Player(QWidget):
             self._qt_out.setVolume(self._volume / 100)
             self._qt_ext_out.setVolume(self._volume / 100)
 
+    def set_gain_db(self, db: float) -> None:
+        """Preview a volume change (the audio editor): mpv applies it as a filter; Qt playback scales the volume."""
+        self._gain_db = float(db)
+        if self._mpv is not None:
+            try:
+                self._mpv["af"] = f"volume={db:.2f}dB" if abs(db) >= 0.05 else ""
+            except Exception:
+                pass
+        elif self._qt is not None:
+            v = min(1.0, self._volume / 100 * (10 ** (db / 20)))
+            self._qt_out.setVolume(v)
+
     def position(self) -> float:
         return self._pos
 
@@ -304,8 +319,13 @@ class Player(QWidget):
         return self._dur
 
     def _on_pos(self, v: float) -> None:
+        # mpv reports the position many times a second for audio; passing on about 25 a second is plenty for the
+        # playhead and keeps the rest of the window responsive while a song plays.
         self._pos = v
-        self.positionChanged.emit(v)
+        now = time.monotonic()
+        if now - self._last_pos_emit >= 0.04 or abs(v - self._last_pos_val) > 1.0:
+            self._last_pos_emit, self._last_pos_val = now, v
+            self.positionChanged.emit(v)
 
     def _on_pause(self, paused: bool) -> None:
         self._paused = paused

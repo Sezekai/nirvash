@@ -16,6 +16,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 tmp = Path(tempfile.mkdtemp())
 os.environ["NIRVASH_DATA"] = str(tmp / "data")
 os.environ["NIRVASH_ROOT"] = str(tmp / "root")
+os.environ.setdefault("NIRVASH_AUTO_DIALOGS", "reject")   # start-up questions answer "not now"
 REAL = sys.platform == "win32"   # on Windows (CI) use real playback and grab the screen
 if not REAL:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -148,11 +149,15 @@ def shoot():
 
     for width, height in ((1100, 720), (1440, 900), (1920, 1040)):
         w.resize(width, height)
-        for key in ("library", "scan", "auto", "settings", "look", "keys"):
+        for key in ("library", "scan", "auto", "settings", "look"):
             w.go(key)
             if key == "auto":
                 w.auto_page.table.selectRow(0)
             snap(f"{key}_{width}")
+        w.go("library")
+        w.toggle_keys()
+        snap(f"keys_{width}")
+        w.toggle_keys()
     w.resize(1440, 900)
     w.go("library")
     w.library.set_filter("approved", 1)
@@ -183,6 +188,16 @@ def shoot():
     snap("job_stopped")
     w.toast.show_msg("Exported 2 videos next to the originals.", "ok")
     snap("toast")
+    # the audio editor on the first song, trimmed a little and 3 dB louder
+    from nirvash.ui.audio_editor import AudioEditDialog
+    ed = AudioEditDialog(w, 1)
+    ed.wave.set_range(4.5, 52.0, emit=True)
+    ed.gain.setValue(6)
+    ed.resize(960, ed.sizeHint().height())
+    ed.show()
+    wait(2.0)
+    ed.grab().save(str(OUT / "audio_editor.png"))
+    ed.done(0)
     # a light theme and a plain dark one
     from nirvash.core import appearance as ap
     for bg in ("daylight", "obsidian"):

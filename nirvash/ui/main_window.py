@@ -19,7 +19,7 @@ from .automusic_page import AutoMusicPage
 from .drawer import Drawer, undo
 from .hub import hub
 from .jobqueue import get_queue
-from .keys_page import KeysPage
+from .keys_page import KeysPopup
 from .library_page import LibraryPage
 from .look_page import LookPage
 from .scan_page import ScanPage
@@ -185,7 +185,7 @@ class Rail(QWidget):
             lay.addWidget(self._btn(key, text, ic), 0, Qt.AlignHCenter)
         lay.addStretch(1)
         for key, text, ic in win.BOTTOM:
-            lay.addWidget(self._btn(key, text, ic, page=key != "log"), 0, Qt.AlignHCenter)
+            lay.addWidget(self._btn(key, text, ic, page=key not in ("log", "keys")), 0, Qt.AlignHCenter)
         self.restyle()
 
     def _btn(self, key: str, text: str, ic: str, page: bool = True) -> QToolButton:
@@ -200,6 +200,8 @@ class Rail(QWidget):
         if page:
             self.group.addButton(b)
             b.clicked.connect(lambda _=False, k=key: self.win.go(k))
+        elif key == "keys":
+            b.clicked.connect(lambda _=False: self.win.toggle_keys())
         else:
             b.clicked.connect(lambda on: self.win.toggle_log(on))
         self.btns[key] = b
@@ -321,10 +323,8 @@ class MainWindow(QMainWindow):
         self.editor_page = EditorPlaceholder()
         self.look_page = LookPage()
         self.settings_page = SettingsPage()
-        self.keys_page = KeysPage()
         self.pages = {"library": self.library, "scan": self.scan_page, "auto": self.auto_page,
-                      "editor": self.editor_page, "look": self.look_page, "settings": self.settings_page,
-                      "keys": self.keys_page}
+                      "editor": self.editor_page, "look": self.look_page, "settings": self.settings_page}
         for p in self.pages.values():
             self.stack.addWidget(p)
         right.addWidget(self.stack, 1)
@@ -352,20 +352,27 @@ class MainWindow(QMainWindow):
         _log.add_listener(lambda lvl, msg: hub.logLine.emit(lvl, msg))
         hub.identifyStatus.connect(self.status.set_identify)
         hub.themeChanged.connect(self._theme_changed)
+        # Glow on main buttons needs to see every button as it appears, which means watching every event in the
+        # app; that only runs while the Glow style is chosen (it made everything slower when always on).
         self._glow = _GlowFilter(self)
-        QApplication.instance().installEventFilter(self._glow)
+        self._glow_on = False
+        self._sync_glow_filter()
 
         self.identify = IdentifyQueue(on_change=lambda sid: hub.songChanged.emit(sid),
                                       on_status=lambda st: hub.identifyStatus.emit(st))
         self.status.identify = self.identify
         self._hidden_panels = False
         self.rail.setVisible(not self.s.get("ui.rail_hidden", False))
+        self.keys_popup = KeysPopup(self.centralWidget())
+        self.keys_popup.closed.connect(lambda: self.rail.btns["keys"].setChecked(False))
         self._keys()
         self.go("library")
         if self.s.get("ui.log_open", False):
             self.toggle_log(True)
         QTimer.singleShot(400, self._check_banners)
         QTimer.singleShot(900, self._check_models)
+        QTimer.singleShot(2500, self._ask_level)
+        self.queue.finishedJob.connect(self._job_finished)
 
     # ---- window frame -------------------------------------------------------------
     def nativeEvent(self, event_type, message):
@@ -416,13 +423,14 @@ class MainWindow(QMainWindow):
 
     # ---- keys --------------------------------------------------------------------------
     def _keys(self) -> None:
-        def sc(seq, fn):
+        def sc(seq, fn, always: bool = False):
             s = QShortcut(QKeySequence(seq), self)
             s.setContext(Qt.WindowShortcut)
-            s.activated.connect(fn)
+            # while the shortcuts popup is open, other keys do nothing (DESIGN.md)
+            s.activated.connect(lambda: fn() if always or not self.keys_popup.isVisible() else None)
             return s
 
-        sc("K", lambda: self.go("keys"))
+        sc("K", self.toggle_keys, always=True)
         sc("/", self._search)
         sc("Ctrl+F", self._search)
         sc("F", self.toggle_full)
@@ -432,9 +440,10 @@ class MainWindow(QMainWindow):
         sc("M", self.toggle_rail)
         sc("S", lambda: self.go("settings"))
         sc("Ctrl+Z", lambda: undo(None))
-        sc("Esc", self._escape)
+        sc("Esc", self._escape, always=True)
         for seq, name in (("Space", "play_pause"), ("Left", "prev"), ("Right", "next"), ("PgUp", "prev"),
-                          ("PgDown", "next"), ("Home", "first"), ("End", "last")):
+                          ("PgDown", "next"), ("Home", "first"), ("End", "last"),
+                          ("-", "volume_down"), ("=", "volume_up"), ("+", "volume_up"), ("0", "mute")):
             sc(seq, lambda n=name: self._page_key(n))
 
     def _page_key(self, name: str) -> None:
@@ -476,8 +485,14 @@ class MainWindow(QMainWindow):
         self.rail.setVisible(on)
         self.s.set("ui.rail_hidden", not on)
 
+    def toggle_keys(self) -> None:
+        self.keys_popup.toggle()
+        self.rail.btns["keys"].setChecked(self.keys_popup.isVisible())
+
     def _escape(self) -> None:
-        if self._hidden_panels:
+        if self.keys_popup.isVisible():
+            self.toggle_keys()
+        elif self._hidden_panels:
             self.toggle_panels()
         elif self.isFullScreen():
             self.toggle_full()
@@ -493,8 +508,16 @@ class MainWindow(QMainWindow):
                 p.theme_changed()
         for b in self.findChildren(QPushButton, "primary"):
             apply_glow(b)
+        self._sync_glow_filter()
         self.status.refresh()
         self.centralWidget().update()
+
+    def _sync_glow_filter(self) -> None:
+        on = bool(theme.T.get("glow"))
+        if on != self._glow_on:
+            app = QApplication.instance()
+            (app.installEventFilter if on else app.removeEventFilter)(self._glow)
+            self._glow_on = on
 
     # ---- start-up checks --------------------------------------------------------------------
     def show_banner(self, icon_name: str, text: str, actions: list[tuple[str, object]]) -> None:
@@ -549,6 +572,47 @@ class MainWindow(QMainWindow):
         args = sys.argv[1:] if getattr(sys, "frozen", False) else sys.argv
         QProcess.startDetached(sys.executable, args)
         self.close()
+
+    # ---- evening out song volume ------------------------------------------------------------
+    def _job_finished(self, qj) -> None:
+        if qj.state == "done" and qj.name.startswith("Finding music"):
+            self.level_new_songs()
+
+    def level_new_songs(self) -> None:
+        """After a scan: even out the songs it added (Settings > Song volume)."""
+        from ..jobs import audio_edit as ae
+        if not self.s.get("level.auto", True):
+            return
+        ids = ae.songs_to_level()
+        if not ids or any(j.name.startswith("Evening out") for j in ([self.queue.current] + self.queue.waiting) if j):
+            return
+        n = len(ids)
+        self.queue.add(f"Evening out {n} song{'s' if n != 1 else ''}", ae.level_songs, ids, pausable=True,
+                       on_event=lambda k, p: hub.songChanged.emit(int(p)) if k == "song_changed" else None,
+                       done_text=lambda res: f"{res['changed']} of {res['measured']} songs made louder or quieter")
+
+    def _ask_level(self) -> None:
+        """Once, after updating to a version with automatic levelling: offer it for the songs already there."""
+        from ..core.db import get_db
+        from ..jobs import audio_edit as ae
+        db = get_db()
+        if db.kv_get("level_asked") or not self.s.get("level.auto", True):
+            return
+        ids = ae.songs_to_level()
+        db.kv_set("level_asked", "1")
+        if not ids:
+            return
+        n = len(ids)
+        if dialogs.ask(self, f"Even out the volume of your {n} songs?",
+                       "Nirvash can now make songs that are much louder or quieter than the rest sound alike. It "
+                       "measures every song and changes only the ones well away from the rest (the file itself, so "
+                       "it plays the same in any player). Each changed song's original is kept in "
+                       "Library\\Originals, so Back to the original undoes it. It runs in the background and can be "
+                       "paused. New songs are evened out after each scan; turn that off in Settings > Song volume.",
+                       f"Even out {n} songs", cancel="Leave them as they are"):
+            self.level_new_songs()
+        else:
+            db.x("UPDATE songs SET level_done=1 WHERE level_done=0")
 
     def _check_models(self) -> None:
         missing = [sp for sp in (models.AST, models.CLIP) if not models.status(sp)["present"]]

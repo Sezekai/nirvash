@@ -11,7 +11,9 @@ A simple, lossless-first video tool.
   - Folder tree of where songs came from (with subfolders) and a sortable Folder column.
   - Rename files to *Artist - Title* and write title/artist/album/genre/year/cover tags Explorer shows; copies of the same song get their differences (length, BPM…) in the name. Nothing is overwritten and the audio isn't touched.
   - Remove video links: forgets the source videos, renames the file and clears its tags; later scans never relink it.
-  - Delete can skip the songs' videos (and the same music) in later scans. Undo in Settings → Reset.
+  - Delete can skip the songs' videos (and, if you tick it, the same music) in later scans. Undo in Settings → Reset.
+  - **Edit audio** (right-click a song or the waveform, or E): drag handles to trim the start or end, change the volume (with an "Even out" button), or re-cut the song from the full sound of the video it came from. Trimming copies the audio untouched; a volume change re-encodes once at high quality in the same format so it plays the same in any player. The original is kept in `Library\Originals`, so **Back to the original** always undoes it.
+  - **Even volume:** after each scan, songs much louder or quieter than the rest (more than 2 dB from −14 LUFS) are evened out automatically; the rest aren't touched. Settings → Song volume changes the target or turns it off.
 - **Auto-music** — pick a folder of silent videos; Nirvash picks a song for each one by length, pace and mood, then you review, swap and export. The video stream is always copied untouched.
 
 **Around the app (0.2):**
@@ -29,7 +31,7 @@ A simple, lossless-first video tool.
 
 | Key | Does |
 | --- | --- |
-| K | List of keys |
+| K | Keyboard shortcuts (a popup over any screen) |
 | / or Ctrl+F | Search |
 | F or F11 | Full screen |
 | H | Hide panels (H or Esc brings them back) |
@@ -38,10 +40,12 @@ A simple, lossless-first video tool.
 | S | Settings |
 | Ctrl+Z | Undo the last rename or move |
 | Esc | Close what's open |
-| Space | Play / pause |
+| Space | Play / pause (or click the playing song's row) |
+| - / = | Volume down / up |
+| 0 | Mute / unmute |
 | ← → PgUp PgDn, Home End | Previous / next, first / last |
 | Enter | Play the selected song |
-| V / A / Delete | Favourite / approve / delete (library) |
+| V / A / E / Delete | Favourite / approve / edit audio / delete (library) |
 | R | Mark the video ready (Auto-music) |
 
 **Stage 2** adds the editor (trims, joins, moving crop with tracking, zoom, rotate, blur/pixelate, overlays, colour).
@@ -61,6 +65,7 @@ Updating = replace the `App` folder. Nothing else is touched.
 | --- | --- |
 | `E:\Pictures\Nirvash\App` | the program (replaced by updates) |
 | `E:\Pictures\Nirvash\Library\Songs` | extracted songs |
+| `E:\Pictures\Nirvash\Library\Originals` | originals of songs you trimmed or whose volume changed (for undoing) |
 | `E:\Pictures\Nirvash\Library\Overlays` | overlays (Stage 2) |
 | `E:\Pictures\Nirvash\Models` | AI models |
 | `E:\Pictures\Nirvash\Cache` | previews, waveforms, cover art (safe to delete) |

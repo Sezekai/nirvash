@@ -21,6 +21,7 @@ PLACES = [
     ("songs", "Song library", True, False),
     ("models", "AI models", True, False),
     ("cache", "Cache: previews, waveforms, cover art", True, True),
+    ("originals", "Song originals: kept so trims and volume changes can be undone", True, False),
     ("overlays", "Overlays (for the editor)", True, False),
     ("data", "Settings, library database, logs and themes", True, False),
 ]
@@ -34,7 +35,8 @@ def place_path(key: str) -> Path:
     if custom:
         return Path(custom)
     return {"songs": s.root() / "Library" / "Songs", "overlays": s.root() / "Library" / "Overlays",
-            "models": s.root() / "Models", "cache": s.root() / "Cache"}[key]
+            "models": s.root() / "Models", "cache": s.root() / "Cache",
+            "originals": s.root() / "Library" / "Originals"}[key]
 
 
 def folder_size(p: Path) -> tuple[int, int]:

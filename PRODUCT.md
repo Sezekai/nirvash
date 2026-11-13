@@ -35,7 +35,9 @@ audio samples sent to the song lookup services the owner has turned on.
 | STANDARDS.md: tick boxes for picking items | Not used; rows are selected the usual way (click, Shift, Ctrl) | Owner's choice |
 | STANDARDS.md: one portable .exe | A zipped folder unpacking to `Nirvash\App` | libmpv, FFmpeg and ONNX Runtime are large and start faster unpacked |
 | STANDARDS.md: favourite key | Favourite is **V** (not F) | F is full screen everywhere in the suite |
-| Keys | Auto-music uses **R** for "ready" | Its own review step |
+| Keys | Auto-music uses **R** for "ready"; the library uses **E** to edit a song's audio | Their own steps |
+| Keys | Volume is **-** and **=**, mute is **0** (not ↑ ↓) | ↑ ↓ move through the song list; the owner chose - and =, 0 sits beside them |
+| Lossless first | A volume change re-encodes the song once (same format, high bitrate), always from the kept original | The owner wants volume changes to carry over to other players; trims alone stay lossless |
 
 ## Release
 

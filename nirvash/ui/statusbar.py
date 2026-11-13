@@ -129,7 +129,7 @@ class HwChip(QFrame):
         lay.addWidget(self.txt)
         self.stats: dict | None = None
         self._busy = False
-        self.timer = QTimer(self, interval=2000, timeout=self._poll)
+        self.timer = QTimer(self, interval=5000, timeout=self._poll)
 
     def start(self) -> None:
         self._show()

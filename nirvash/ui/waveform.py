@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from ..core.settings import get_settings
@@ -38,6 +38,7 @@ def compute_peaks(path: str, key: str, n: int = 900) -> np.ndarray:
 
 class Waveform(QWidget):
     seekRequested = Signal(float)
+    menuRequested = Signal(object)      # global QPoint: right-click (the library offers Trim / volume there)
 
     def __init__(self, parent=None, height: int = 46):
         super().__init__(parent)
@@ -89,14 +90,49 @@ class Waveform(QWidget):
             self.pos = self._x_to_t(e.position().x())
             self.update()
 
+    def contextMenuEvent(self, e):  # noqa: N802
+        self.menuRequested.emit(e.globalPos())
+
     def mouseReleaseEvent(self, e):
         if self._dragging:
             self._dragging = False
             self.seekRequested.emit(self._x_to_t(e.position().x()))
 
+    def _bars(self) -> tuple:
+        """The bars drawn twice, once in the played colours and once in the rest colour, kept until the size,
+        the song or the theme changes. Painting is then two pixmaps and a line, which keeps playback smooth."""
+        w, h = self.width(), self.height()
+        dpr = self.devicePixelRatioF()
+        key = (w, h, dpr, id(self.peaks), C["teal"], C["violet"], C["surface3"])
+        if getattr(self, "_bars_key", None) == key:
+            return self._bars_pm
+        mid = h / 2
+        n = len(self.peaks)
+        bar, gap = 3.0, 1.0
+        count = max(1, int(w / (bar + gap)))
+        idx = np.linspace(0, n - 1, count).astype(int)
+        path = QPainterPath()
+        for i, v in enumerate(self.peaks[idx]):
+            bh = max(2.0, float(v) * (h - 6))
+            path.addRoundedRect(QRectF(i * (bar + gap), mid - bh / 2, bar, bh), 1.2, 1.2)
+        played = QLinearGradient(0, 0, w, 0)
+        played.setColorAt(0, QColor(C["teal"]))
+        played.setColorAt(1, QColor(C["violet"]))
+        out = []
+        for brush in (QColor(C["surface3"]).lighter(135), played):
+            pm = QPixmap(max(1, int(w * dpr)), max(1, int(h * dpr)))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.transparent)
+            q = QPainter(pm)
+            q.setRenderHint(QPainter.Antialiasing)
+            q.fillPath(path, brush)
+            q.end()
+            out.append(pm)
+        self._bars_key, self._bars_pm = key, tuple(out)
+        return self._bars_pm
+
     def paintEvent(self, _):
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
         mid = h / 2
         frac = (self.pos / self.duration) if self.duration > 0 else 0.0
@@ -109,25 +145,15 @@ class Waveform(QWidget):
             p.setPen(QPen(QColor(C["border"]), 1))
             p.drawLine(0, int(mid), w, int(mid))
         else:
-            n = len(self.peaks)
-            bar = 3.0
-            gap = 1.0
-            count = max(1, int(w / (bar + gap)))
-            idx = np.linspace(0, n - 1, count).astype(int)
-            vals = self.peaks[idx]
-            played = QLinearGradient(0, 0, w, 0)
-            played.setColorAt(0, QColor(C["teal"]))
-            played.setColorAt(1, QColor(C["violet"]))
-            path_played = QPainterPath()
-            path_rest = QPainterPath()
-            for i, v in enumerate(vals):
-                x = i * (bar + gap)
-                bh = max(2.0, float(v) * (h - 6))
-                rect = QRectF(x, mid - bh / 2, bar, bh)
-                (path_played if x + bar <= px else path_rest).addRoundedRect(rect, 1.2, 1.2)
-            p.fillPath(path_rest, QColor(C["surface3"]).lighter(135))
-            p.fillPath(path_played, played)
+            rest, played = self._bars()
+            p.drawPixmap(0, 0, rest)
+            if px > 0:
+                p.save()
+                p.setClipRect(QRectF(0, 0, px, h))
+                p.drawPixmap(0, 0, played)
+                p.restore()
         if self.duration > 0:
+            p.setRenderHint(QPainter.Antialiasing)
             p.setPen(QPen(QColor(C["text"]), 1.6))
             p.drawLine(QPointF(px, 2), QPointF(px, h - 2))
         p.end()

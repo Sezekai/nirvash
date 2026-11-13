@@ -337,8 +337,13 @@ class PlayerBar(QFrame):
         lay.addWidget(self.t_pos)
         lay.addWidget(self.wave, 1)
         lay.addWidget(self.t_dur)
-        self.vol_icon = QLabel()
-        self.vol_icon.setPixmap(theme.pixmap("volume", 15, C["sec"]))
+        self.vol_icon = QToolButton()          # click to mute (0 does the same)
+        self.vol_icon.setObjectName("flat")
+        self.vol_icon.setCursor(Qt.PointingHandCursor)
+        self.vol_icon.setIconSize(QSize(15, 15))
+        self.vol_icon.setFixedSize(24, 24)
+        self.vol_icon.clicked.connect(self.toggle_mute)
+        self.muted = False
         lay.addWidget(self.vol_icon)
         self.vol = QSlider(Qt.Horizontal)
         self.vol.setRange(0, 100)
@@ -346,6 +351,7 @@ class PlayerBar(QFrame):
         self.vol.setValue(int(get_settings().get("ui.volume", 80)))
         self.vol.valueChanged.connect(self._vol)
         self.player.set_volume(self.vol.value())
+        self._vol_icon()
         lay.addWidget(self.vol)
         self.wave.seekRequested.connect(self.player.seek)
         self.player.positionChanged.connect(self._pos)
@@ -358,13 +364,36 @@ class PlayerBar(QFrame):
             f"QToolButton#playRound {{ border-radius: 14px; background: {theme.grad()}; padding: 0; }}"
             f"QToolButton#playRound:hover {{ background: {C['text']}; }}")
         self.play_btn.setIcon(icon("pause" if getattr(self, "_on", False) else "play", C["on_acc"], 13))
+        if hasattr(self, "vol_icon"):
+            self._vol_icon()
 
     def nudge_volume(self, delta: int) -> None:
+        if self.muted:
+            self.toggle_mute()
         self.vol.setValue(max(0, min(100, self.vol.value() + delta)))
+        self._vol_tip()
+
+    def toggle_mute(self) -> None:
+        self.muted = not self.muted
+        self.player.set_volume(0 if self.muted else self.vol.value())
+        self._vol_icon()
+        self._vol_tip()
+
+    def _vol_icon(self) -> None:
+        self.vol_icon.setIcon(icon("mute" if self.muted else "volume", C["warn"] if self.muted else C["sec"], 15))
+        self.vol_icon.setToolTip("Unmute (0)" if self.muted else "Mute (0) · volume down - and up =")
+
+    def _vol_tip(self) -> None:
+        """Show the new volume next to the slider for a moment, so key presses can be seen working."""
+        from PySide6.QtWidgets import QToolTip
+        if self.isVisible():
+            txt = "Muted" if self.muted else f"Volume {self.vol.value()}%"
+            QToolTip.showText(self.vol.mapToGlobal(QPoint(0, -34)), txt, self.vol, self.vol.rect(), 1200)
 
     def _vol(self, v: int) -> None:
         from ..core.settings import get_settings
-        self.player.set_volume(v)
+        if not self.muted:
+            self.player.set_volume(v)
         get_settings().set("ui.volume", v)
 
     def _pos(self, s: float) -> None:

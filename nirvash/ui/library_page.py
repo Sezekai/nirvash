@@ -9,8 +9,8 @@ from pathlib import Path, PurePath
 
 from PySide6.QtCore import (QAbstractTableModel, QEvent, QItemSelectionModel, QModelIndex, QRect, QSize,
                             QSortFilterProxyModel, Qt, QTimer, Signal)
-from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
+from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
                                QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMenu, QPushButton, QScrollArea,
                                QSizePolicy, QSplitter, QStyle, QStyledItemDelegate, QTableView, QTextBrowser,
@@ -77,7 +77,7 @@ def song_row(r, videos: list[str] | None = None) -> dict:
         if f not in folders:
             folders.append(f)
     first = folders[0][1] if folders else ()
-    return {
+    row = {
         "id": r["id"], "path": r["file_path"],
         "title": r["title"] or Path(r["file_path"]).stem, "artist": r["artist"] or "",
         "identified": bool(r["title"]),
@@ -92,6 +92,40 @@ def song_row(r, videos: list[str] | None = None) -> dict:
         "folder_txt": first[-1] if first else "",
         "folder_full": str(PurePath(*first)) if first else "",
     }
+    row["texts"] = row_texts(row)
+    return row
+
+
+def wave_key(r) -> str:
+    """Cache name for a song's waveform: changes whenever the audio is edited."""
+    return f"song{r['id']}-{int(r['duration'] * 1000)}-{r['gain_db'] or 0:+.1f}-{r['trim_start'] or 0:.2f}"
+
+
+def row_texts(r: dict) -> list:
+    """What each column shows, worked out once per row rather than on every paint."""
+    t = []
+    for k in KEYS:
+        if k == "title":
+            t.append(r["title"])
+        elif k == "artist":
+            t.append(r["artist"])
+        elif k == "length":
+            t.append(fmt_time(r["duration"]))
+        elif k == "full":
+            t.append(fmt_time(r["full"]) if r["full"] else "")
+        elif k == "bpm":
+            t.append(f"{r['bpm']:.0f}" if r["bpm"] else "")
+        elif k == "genre":
+            t.append(r["genre"])
+        elif k == "mood":
+            t.append(r["mood_txt"])
+        elif k == "folder":
+            t.append(r["folder_txt"])
+        elif k == "plays":
+            t.append(str(r["listens"]) if r["played"] else "")
+        else:
+            t.append(None)
+    return t
 
 
 class ListenTracker:
@@ -135,6 +169,9 @@ class ListenTracker:
             self.counted = True
             return True
         return False
+
+
+_ROLES = {ROLE_SORT, Qt.ForegroundRole, Qt.ToolTipRole, Qt.DecorationRole, Qt.TextAlignmentRole}
 
 
 class LibraryModel(QAbstractTableModel):
@@ -191,32 +228,15 @@ class LibraryModel(QAbstractTableModel):
         return None
 
     def data(self, idx: QModelIndex, role=Qt.DisplayRole):
-        if not idx.isValid():
+        # Called for every cell on every paint: the common cases come first and do as little as possible.
+        if role == ROLE_ROW:
+            return self.rows[idx.row()]
+        if role == Qt.DisplayRole:
+            return self.rows[idx.row()]["texts"][idx.column()]
+        if role not in _ROLES:
             return None
         r = self.rows[idx.row()]
         k = KEYS[idx.column()]
-        if role == ROLE_ROW:
-            return r
-        if role == Qt.DisplayRole:
-            if k == "title":
-                return r["title"]
-            if k == "artist":
-                return r["artist"]
-            if k == "length":
-                return fmt_time(r["duration"])
-            if k == "full":
-                return fmt_time(r["full"]) if r["full"] else ""
-            if k == "bpm":
-                return f"{r['bpm']:.0f}" if r["bpm"] else ""
-            if k == "genre":
-                return r["genre"]
-            if k == "mood":
-                return r["mood_txt"]
-            if k == "folder":
-                return r["folder_txt"]
-            if k == "plays":
-                return str(r["listens"]) if r["played"] else ""
-            return None
         if role == ROLE_SORT:
             return {
                 "play": int(r["id"] == self.playing_sid), "fav": r["favourite"], "title": r["title"].casefold(),
@@ -322,65 +342,106 @@ def _pill(p: QPainter, opt, chips: list[tuple[str, str]]) -> None:
     p.restore()
 
 
-class ChipDelegate(QStyledItemDelegate):
-    """Paints the Categories and Status columns as coloured pills."""
+_PM: dict[tuple, QPixmap] = {}
 
-    def __init__(self, model: LibraryModel, kind: str, parent):
+
+def _cached_pixmap(name: str, size: int, colour: str) -> QPixmap:
+    """Icons drawn in table rows, rendered once per name/size/colour instead of on every paint."""
+    key = (name, size, colour)
+    pm = _PM.get(key)
+    if pm is None:
+        if len(_PM) > 200:
+            _PM.clear()
+        pm = _PM[key] = theme.pixmap(name, size, colour)
+    return pm
+
+
+class CellDelegate(QStyledItemDelegate):
+    """Paints every cell of the library table itself.
+
+    The stock delegate asks the model for a dozen things per cell on every paint, each a trip from Qt into Python,
+    which made scrolling and clicking choppy with a big library. This asks once per cell for the row (already
+    worked out) and draws the text, star, play button and tags directly."""
+
+    def __init__(self, model: "LibraryModel", parent):
         # Must have a parent (and a Python reference): the view only keeps a raw pointer, so a delegate
         # Python frees would be painted through a dangling pointer - that crashed Qt6Widgets on Windows.
         super().__init__(parent)
-        self.m, self.kind = model, kind
+        self.m = model
+        self.view = parent
+        # Cells are painted a row at a time, so the row looked up for the first cell serves the rest.
+        # Forgotten whenever the rows could have moved.
+        self._row: tuple[int, dict | None] = (-1, None)
+        pm = parent.model()
+        for sig in (pm.modelReset, pm.layoutChanged, pm.rowsInserted, pm.rowsRemoved, pm.rowsMoved,
+                    pm.dataChanged, model.modelReset, model.dataChanged):
+            sig.connect(self.forget)
+
+    def forget(self, *_a) -> None:
+        self._row = (-1, None)
 
     def paint(self, p: QPainter, opt, idx):
-        super().paint(p, opt, idx)
-        r = idx.data(ROLE_ROW)
+        row = idx.row()
+        if self._row[0] == row:
+            r = self._row[1]
+        else:
+            r = idx.data(ROLE_ROW)
+            self._row = (row, r)
+        # background, hover and selection exactly as the theme styles them (no text: opt carries none)
+        self.view.style().drawControl(QStyle.CE_ItemViewItem, opt, p, self.view)
         if r is None:
             return
-        chips: list[tuple[str, str]] = []
-        if self.kind == "cats":
-            for cid in sorted(self.m.cats.get(r["id"], ())):
-                if cid in self.m.cat_info:
-                    chips.append(self.m.cat_info[cid])
-        else:
+        col = idx.column()
+        k = KEYS[col]
+        rect = opt.rect
+        if k == "play":
+            self._play(p, rect, r, bool(opt.state & QStyle.State_MouseOver))
+        elif k == "fav":
+            s = 16
+            pm = (_cached_pixmap("star_on", s, C["amber"]) if r["favourite"] else _cached_pixmap("star", s, C["faint"]))
+            p.drawPixmap(rect.x() + (rect.width() - s) // 2, rect.y() + (rect.height() - s) // 2, s, s, pm)
+        elif k == "cats":
+            _pill(p, opt, [self.m.cat_info[c] for c in sorted(self.m.cats.get(r["id"], ())) if c in self.m.cat_info])
+        elif k == "status":
+            chips: list[tuple[str, str]] = []
             if r["approved"]:
                 chips.append(("Approved", "ok"))
             if r["partial"] and not r["checked"]:
                 chips.append(("Check", "warn"))
             if r["status"] in STATUS:
                 chips.append(STATUS[r["status"]])
-        _pill(p, opt, chips)
+            _pill(p, opt, chips)
+        else:
+            text = r["texts"][col]
+            if not text:
+                return
+            p.setFont(opt.font)
+            p.setPen(QColor(C["text"] if (k == "title" or opt.state & QStyle.State_Selected) else C["muted"]))
+            tr = rect.adjusted(6, 0, -6, 0)
+            align = (Qt.AlignRight if k in _RIGHT else Qt.AlignLeft) | Qt.AlignVCenter
+            p.drawText(tr, align, opt.fontMetrics.elidedText(text, Qt.ElideRight, tr.width()))
 
-
-class PlayDelegate(QStyledItemDelegate):
-    """The play / pause button at the start of each row."""
-
-    def __init__(self, model: LibraryModel, parent):
-        super().__init__(parent)          # parented for the same reason as ChipDelegate
-        self.m = model
-
-    def paint(self, p: QPainter, opt, idx):
-        super().paint(p, opt, idx)
-        r = idx.data(ROLE_ROW)
-        if r is None:
-            return
+    def _play(self, p: QPainter, rect, r, hover: bool) -> None:
         cur = r["id"] == self.m.playing_sid
         playing = cur and self.m.playing
-        hover = bool(opt.state & QStyle.State_MouseOver)
         p.save()
         p.setRenderHint(QPainter.Antialiasing)
-        d = max(14, min(20, opt.rect.height() - 4))
-        rc = QRect(opt.rect.x() + (opt.rect.width() - d) // 2, opt.rect.y() + (opt.rect.height() - d) // 2, d, d)
+        d = max(14, min(20, rect.height() - 4))
+        rc = QRect(rect.x() + (rect.width() - d) // 2, rect.y() + (rect.height() - d) // 2, d, d)
         if cur or hover:
             bg = QColor(C["acc"])
             bg.setAlpha(255 if playing else 55)
             p.setPen(Qt.NoPen)
             p.setBrush(bg)
             p.drawEllipse(rc)
-        col = C["on_acc"] if playing else (C["acc"] if (cur or hover) else C["sec"])
+        colour = C["on_acc"] if playing else (C["acc"] if (cur or hover) else C["sec"])
         s = max(8, d - 10)
-        pm = theme.pixmap("pause" if playing else "play", s, col)
+        pm = _cached_pixmap("pause" if playing else "play", s, colour)
         p.drawPixmap(rc.x() + (d - s) // 2 + (0 if playing else 1), rc.y() + (d - s) // 2, s, s, pm)
         p.restore()
+
+
+_RIGHT = {"length", "full", "bpm", "plays"}
 
 
 class TriChip(QPushButton):
@@ -533,7 +594,7 @@ class DeleteDialog(dialogs.Dialog):
         self.skip_videos.setEnabled(n_videos > 0)
         self.body.addWidget(self.skip_videos)
         self.skip_songs = QCheckBox("Don't add the same music again if it turns up in other videos")
-        self.skip_songs.setChecked(True)
+        self.skip_songs.setChecked(False)       # off unless asked for: the same music in another video is often wanted
         self.body.addWidget(self.skip_songs)
         self.body.addWidget(label("You can undo both in Settings → Reset → Skipped videos & songs.", "faint", wrap=True))
         self.add_button("Cancel", "cancel")
@@ -936,19 +997,18 @@ class LibraryPage(QWidget):
         self.table.viewport().installEventFilter(self)
         self._restore_widths()
         self._apply_columns()
-        # Delegates are children of the table and kept referenced (see ChipDelegate).
-        self.chip_delegates = [ChipDelegate(self.model, "cats", self.table),
-                               ChipDelegate(self.model, "status", self.table)]
-        self.play_delegate = PlayDelegate(self.model, self.table)
-        self.table.setItemDelegateForColumn(COL["cats"], self.chip_delegates[0])
-        self.table.setItemDelegateForColumn(COL["status"], self.chip_delegates[1])
-        self.table.setItemDelegateForColumn(COL["play"], self.play_delegate)
+        # The delegate is a child of the table and kept referenced (see CellDelegate).
+        self.cell_delegate = CellDelegate(self.model, self.table)
+        self.table.setItemDelegate(self.cell_delegate)
         self.table.clicked.connect(self._clicked)
         self.table.doubleClicked.connect(lambda idx: self.play(self._sid(idx)) if idx.column() > COL["fav"] else None)
         self.table.selectionModel().currentRowChanged.connect(lambda cur, _p: self._select(cur))
         split.addWidget(self.table)
 
         self.detail = DetailPanel(self)
+        self._pending_sid: int | None = None
+        self._row_was_current = False
+        self._detail_timer = QTimer(self, singleShot=True, interval=60, timeout=self._show_selected)
         split.addWidget(self.detail)
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
@@ -966,11 +1026,13 @@ class LibraryPage(QWidget):
         self.player.positionChanged.connect(self._pos)
         self.player.ended.connect(self._ended)
         self.player.playingChanged.connect(self._playing_changed)
+        self.bar.wave.menuRequested.connect(self._wave_menu)
 
         # Page keys (the shared ones - Space, arrows, / - come from the main window)
         for keys, fn in (("Delete", lambda: self.delete(self.selected())),
                          ("V", lambda: self.toggle_fav(self.selected())),
                          ("A", lambda: self.toggle_approved(self.selected())),
+                         ("E", lambda: self.edit_audio(self.current())),
                          ("Return", lambda: self.play(self.current()))):
             sc = QShortcut(QKeySequence(keys), self.table)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
@@ -987,6 +1049,15 @@ class LibraryPage(QWidget):
     def focus_search(self) -> None:
         self.search.setFocus()
         self.search.selectAll()
+
+    def key_volume_up(self) -> None:
+        self.bar.nudge_volume(5)
+
+    def key_volume_down(self) -> None:
+        self.bar.nudge_volume(-5)
+
+    def key_mute(self) -> None:
+        self.bar.toggle_mute()
 
     def key_play_pause(self) -> None:
         cur = self.current()
@@ -1281,7 +1352,13 @@ class LibraryPage(QWidget):
             self.table.scrollTo(pidx)
 
     def _select(self, idx: QModelIndex) -> None:
-        sid = self._sid(idx)
+        # The details panel is rebuilt a moment after the selection settles, so holding an arrow key (or clicking
+        # quickly down the list) moves the highlight at once instead of rebuilding the panel for every row passed.
+        self._pending_sid = self._sid(idx)
+        self._detail_timer.start()
+
+    def _show_selected(self) -> None:
+        sid = self._pending_sid
         if sid is None:
             self.detail.show_empty()
         else:
@@ -1295,6 +1372,13 @@ class LibraryPage(QWidget):
             self.toggle_play(sid)
         elif idx.column() == COL["fav"]:
             self.toggle_fav([sid])
+        elif sid == self.playing_sid and not (QApplication.keyboardModifiers() & (Qt.ControlModifier | Qt.ShiftModifier)):
+            # A plain click anywhere on the playing song's row pauses it; clicking it again carries on.
+            if self.player.is_playing():
+                self.player.pause()
+            elif self._row_was_current:
+                self.player.play()
+            self._repaint_play()
 
     def _cat_changed(self, cur, _prev) -> None:
         if cur is None:
@@ -1330,8 +1414,10 @@ class LibraryPage(QWidget):
             return
         self.playing_sid = sid
         self.model.playing_sid = sid
+        from ..jobs import audio_edit
+        audio_edit.playing["sid"] = sid
         name = r["title"] or Path(r["file_path"]).stem
-        self.bar.load(r["file_path"], f"song{sid}-{int(r['duration'] * 1000)}", r["duration"],
+        self.bar.load(r["file_path"], wave_key(r), r["duration"],
                       f"{name} — {r['artist']}" if r["artist"] else name)
         self.tracker.start(sid, r["duration"])
         get_db().mark_played(sid)
@@ -1357,6 +1443,8 @@ class LibraryPage(QWidget):
         self.playing_sid = None
         self.model.playing_sid = None
         self.model.playing = False
+        from ..jobs import audio_edit
+        audio_edit.playing["sid"] = None
         self._repaint_play()
 
     def _pos(self, pos: float) -> None:
@@ -1380,7 +1468,10 @@ class LibraryPage(QWidget):
 
     def _repaint_play(self) -> None:
         self.model.playing = self.player.is_playing() if self.playing_sid is not None else False
-        self.table.viewport().update()
+        # only the play buttons change: repaint that column, not the whole table
+        vp = self.table.viewport()
+        x = self.table.columnViewportPosition(COL["play"])
+        vp.update(QRect(x, 0, self.table.columnWidth(COL["play"]), vp.height()))
         self.detail.update_play()
 
     def open_file(self, path: str) -> None:
@@ -1423,6 +1514,18 @@ class LibraryPage(QWidget):
         if not n_id:
             a.setToolTip("Only identified songs have a title to use")
         m.addAction(icon("unlink", C["pink"]), "Remove video links…", lambda: self.unlink(ids))
+        m.addSeparator()
+        if n == 1 and rows:
+            m.addAction(icon("cut", C["acc"]), "Trim or change volume…\tE", lambda: self.edit_audio(ids[0]))
+            a = m.addAction(icon("film", C["acc"]), "Re-cut from its video…", lambda: self.edit_audio(ids[0], "video"))
+            if not any(Path(x["video_path"]).exists() for x in db.sources(ids[0])):
+                a.setEnabled(False)
+                a.setToolTip("The video this song came from isn't there any more")
+            from ..jobs.audio_edit import is_edited
+            if is_edited(rows[0]):
+                m.addAction(icon("undo"), "Back to the original audio", lambda: self.reset_audio(ids[0]))
+        m.addAction(icon("volume", C["acc"]), f"Even out volume" + (f" ({n} songs)" if n > 1 else ""),
+                    lambda: self.level(ids))
         if n == 1 and rows:
             r = rows[0]
             m.addAction(icon("edit"), "Edit info…", lambda: self.edit_info(ids[0]))
@@ -1611,6 +1714,85 @@ class LibraryPage(QWidget):
         self.batch = None
         self.reload()
 
+    # ---- audio edits ------------------------------------------------------------
+    def edit_audio(self, sid: int | None, mode: str = "song") -> None:
+        """Trim / volume / re-cut: the editor dialog, then a job in the queue."""
+        if sid is None:
+            return
+        from ..jobs import audio_edit as ae
+        from .audio_editor import AudioEditDialog
+        try:
+            d = AudioEditDialog(self, sid, mode)
+        except ae.EditError as e:
+            hub.toast.emit(str(e), "warn")
+            return
+        was_playing = sid == self.playing_sid
+        if was_playing:
+            self.player.pause()
+        if not d.exec() or d.request is None:
+            return
+        req = d.request
+        if req.mode == "reset":
+            self.reset_audio(sid)
+            return
+        if req.mode == "video":
+            self._edit_job("Re-cutting the song", sid, ae.recut, req.video, req.start, req.end, req.gain_db,
+                           done=lambda res: f"Re-cut from the video · now {fmt_time(res['duration'])}")
+        else:
+            self._edit_job("Editing the song", sid, ae.render, trim_start=req.trim_start, trim_end=req.trim_end,
+                           gain_db=req.gain_db,
+                           done=lambda res: f"Saved · {fmt_time(res['duration'])}, {res['how']}")
+
+    def _wave_menu(self, gpos) -> None:
+        sid = self.playing_sid
+        if sid is None:
+            return
+        m = QMenu(self)
+        m.addAction(icon("cut", C["acc"]), "Trim or change volume…", lambda: self.edit_audio(sid))
+        a = m.addAction(icon("film", C["acc"]), "Re-cut from its video…", lambda: self.edit_audio(sid, "video"))
+        a.setEnabled(any(Path(x["video_path"]).exists() for x in get_db().sources(sid)))
+        m.exec(gpos)
+
+    def reset_audio(self, sid: int) -> None:
+        from ..jobs import audio_edit as ae
+        self._edit_job("Putting the original back", sid, ae.reset,
+                       done=lambda res: f"Back to the original · {fmt_time(res['duration'])}")
+
+    def _edit_job(self, name: str, sid: int, fn, *args, done, **kw) -> None:
+        if self.playing_sid == sid:
+            self.stop_playing()              # let go of the file so it can be swapped
+        get_db().update_song(sid, level_done=1)    # a volume you set (or kept) isn't changed by evening out
+
+        def run(ctx, *a):
+            return fn(ctx, sid, *a, **kw)
+
+        def finished(res):
+            hub.songChanged.emit(sid)
+            hub.toast.emit(done(res), "ok")
+            if self.detail.sid == sid:
+                self.detail.show_song(sid)
+
+        get_queue().add(name, run, *args, on_done=finished, done_text=done,
+                        on_failed=lambda msg: hub.toast.emit(f"{name} failed: {msg}", "error"))
+
+    def level(self, ids: list[int]) -> None:
+        """Even out the volume of these songs now, even ones whose volume was set by hand."""
+        from ..jobs import audio_edit as ae
+        n = len(ids)
+        if n > 1 and not dialogs.ask(self, f"Even out the volume of {n} songs?",
+                                     "Songs well away from the library's loudness are made louder or quieter; the "
+                                     "rest are left as they are. Originals are kept, so Back to the original "
+                                     "undoes it for any song.", f"Even out {n} songs"):
+            return
+        if self.playing_sid in ids:
+            self.stop_playing()
+        get_queue().add(f"Evening out {n} song{'s' if n != 1 else ''}", ae.level_songs, list(ids),
+                        ae._is_playing, True, pausable=True,
+                        on_event=lambda k, p: hub.songChanged.emit(int(p)) if k == "song_changed" else None,
+                        done_text=lambda res: f"{res['changed']} of {res['measured']} songs changed",
+                        on_done=lambda res: hub.toast.emit(
+                            f"Evened out: {res['changed']} of {res['measured']} songs changed.", "ok"))
+
     # ---- categories -----------------------------------------------------------
     def new_category(self) -> int | None:
         name = dialogs.ask_text(self, "New category", "Name:", ok="Add category")
@@ -1724,8 +1906,15 @@ class LibraryPage(QWidget):
             self.table.setColumnHidden(COL[k], k in hidden)
 
     def eventFilter(self, obj, ev):
-        if obj is self.table.viewport() and ev.type() == QEvent.Resize:
-            QTimer.singleShot(0, self._apply_columns)
+        if obj is self.table.viewport():
+            t = ev.type()
+            if t == QEvent.Resize:
+                QTimer.singleShot(0, self._apply_columns)
+            elif t == QEvent.MouseButtonPress:
+                # remembered for _clicked: a click only resumes a paused song if its row was already chosen
+                cur = self.table.currentIndex()
+                hit = self.table.indexAt(ev.position().toPoint())
+                self._row_was_current = cur.isValid() and hit.isValid() and cur.row() == hit.row()
         return super().eventFilter(obj, ev)
 
     def _header_menu(self, pos) -> None:

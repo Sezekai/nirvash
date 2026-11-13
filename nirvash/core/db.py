@@ -80,6 +80,14 @@ MIGRATIONS = [
     ("unlinked", "INTEGER NOT NULL DEFAULT 0"),      # video links removed - never re-linked by scans
     ("tagged", "INTEGER NOT NULL DEFAULT 0"),        # file renamed and tagged with the song info
     ("id_methods", "TEXT"),                          # one-off lookup services for the next try, e.g. "shazam"
+    # audio edits (trim / volume / re-cut), always made from a kept original - see jobs/audio_edit.py
+    ("orig_name", "TEXT"),                           # file name of the kept original in the Originals folder
+    ("trim_start", "REAL"),                          # seconds into the original
+    ("trim_end", "REAL"),
+    ("gain_db", "REAL NOT NULL DEFAULT 0"),
+    ("loudness", "REAL"),                            # measured loudness of the original (LUFS)
+    ("true_peak", "REAL"),                           # its true peak (dBTP)
+    ("level_done", "INTEGER NOT NULL DEFAULT 0"),    # volume evened out, or set by hand - automatic levelling leaves it
 ]
 # Columns added to other tables: (table, name, definition)
 TABLE_MIGRATIONS = [
@@ -91,7 +99,8 @@ SONG_FIELDS = (
     "file_path codec ext sample_rate channels bitrate duration title artist album genre year "
     "cover_url shazam_key isrc mbid full_length clip_offset lyrics_plain lyrics_synced bpm energy "
     "pace mood partial checked favourite id_status id_source manual_info added_at "
-    "played listen_count last_played approved unlinked tagged id_methods"
+    "played listen_count last_played approved unlinked tagged id_methods "
+    "orig_name trim_start trim_end gain_db loudness true_peak level_done"
 ).split()
 
 
