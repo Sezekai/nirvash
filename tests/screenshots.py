@@ -147,9 +147,29 @@ def shoot():
             app.processEvents()
         w.grab().save(str(OUT / f"{name}.png"))
 
+    # the editor with a video, a crop, a blur box and an overlay
+    import cv2 as _cv2
+    import numpy as _np
+    from nirvash.edit import overlays as _ovl
+    _logo = tmp / "logo.png"
+    _img = _np.zeros((120, 240, 4), _np.uint8)
+    _cv2.rectangle(_img, (0, 0), (239, 119), (240, 120, 60, 230), -1)
+    _cv2.putText(_img, "LOGO", (40, 80), _cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255, 255), 5)
+    _cv2.imwrite(str(_logo), _img)
+    _sub = _ovl.new_folder(_ovl.root(), "Logos")
+    _lib = _ovl.import_files([str(_logo)], _sub)
+    ed = w.editor_page
+    ed.open_files([str(src / "clip.mp4")])
+    ed.set_tool("crop")
+    ed.aspect.setCurrentIndex(ed.aspect.findData("9:16"))
+    ed._aspect_changed()
+    ed._blur_drawn((0.62, 0.18, 0.18, 0.22))
+    ed.add_overlay(str(_lib[0]))
+    ed.seek(4.0)
+    ed.set_tool("crop")
     for width, height in ((1100, 720), (1440, 900), (1920, 1040)):
         w.resize(width, height)
-        for key in ("library", "scan", "auto", "settings", "look"):
+        for key in ("library", "scan", "auto", "settings", "look", "editor"):
             w.go(key)
             if key == "auto":
                 w.auto_page.table.selectRow(0)

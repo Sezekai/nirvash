@@ -1,4 +1,4 @@
 """Nirvash: a simple, lossless-first video tool."""
 
 APP_NAME = "Nirvash"
-VERSION = "0.3.0"
+VERSION = "0.4.0"

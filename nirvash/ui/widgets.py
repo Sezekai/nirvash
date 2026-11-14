@@ -114,6 +114,11 @@ class Segmented(QFrame):
         self.value = key
         if key in self.buttons:
             self.buttons[key].setChecked(True)
+        elif key is None:                       # nothing chosen (a second row of the same choice is in use)
+            self.group.setExclusive(False)
+            for b in self.buttons.values():
+                b.setChecked(False)
+            self.group.setExclusive(True)
 
     def set_count(self, key, n: int | None) -> None:
         if key in self.buttons:

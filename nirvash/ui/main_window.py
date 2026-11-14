@@ -320,7 +320,8 @@ class MainWindow(QMainWindow):
         self.library = LibraryPage()
         self.scan_page = ScanPage()
         self.auto_page = AutoMusicPage()
-        self.editor_page = EditorPlaceholder()
+        from .editor_page import EditorPage
+        self.editor_page = EditorPage()
         self.look_page = LookPage()
         self.settings_page = SettingsPage()
         self.pages = {"library": self.library, "scan": self.scan_page, "auto": self.auto_page,
@@ -352,6 +353,7 @@ class MainWindow(QMainWindow):
         _log.add_listener(lambda lvl, msg: hub.logLine.emit(lvl, msg))
         hub.identifyStatus.connect(self.status.set_identify)
         hub.themeChanged.connect(self._theme_changed)
+        hub.editVideos.connect(self._edit_videos)
         # Glow on main buttons needs to see every button as it appears, which means watching every event in the
         # app; that only runs while the Glow style is chosen (it made everything slower when always on).
         self._glow = _GlowFilter(self)
@@ -439,7 +441,7 @@ class MainWindow(QMainWindow):
         sc("L", lambda: self.toggle_log())
         sc("M", self.toggle_rail)
         sc("S", lambda: self.go("settings"))
-        sc("Ctrl+Z", lambda: undo(None))
+        sc("Ctrl+Z", self._undo)
         sc("Esc", self._escape, always=True)
         for seq, name in (("Space", "play_pause"), ("Left", "prev"), ("Right", "next"), ("PgUp", "prev"),
                           ("PgDown", "next"), ("Home", "first"), ("End", "last"),
@@ -454,6 +456,18 @@ class MainWindow(QMainWindow):
         fn = getattr(p, "key_" + name, None)
         if fn:
             fn()
+
+    def _edit_videos(self, paths: list) -> None:
+        self.go("editor")
+        self.editor_page.open_files([str(p) for p in paths])
+
+    def _undo(self) -> None:
+        """Ctrl+Z: the editor undoes its last change; everywhere else it undoes the last rename or move."""
+        p = self.current_page()
+        if hasattr(p, "key_undo"):
+            p.key_undo()
+        else:
+            undo(None)
 
     def _search(self) -> None:
         p = self.current_page()

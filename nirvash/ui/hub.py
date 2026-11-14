@@ -14,6 +14,7 @@ class Hub(QObject):
     toast = Signal(str, str)         # message, kind (info|ok|warn|error)
     movesChanged = Signal()          # the move log changed
     themeChanged = Signal()          # the look changed (Appearance)
+    editVideos = Signal(list)        # open these videos in the editor
 
 
 hub = Hub()

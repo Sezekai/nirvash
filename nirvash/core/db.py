@@ -66,6 +66,9 @@ CREATE TABLE IF NOT EXISTS moves (
     id INTEGER PRIMARY KEY, at REAL NOT NULL, action TEXT NOT NULL, song_id INTEGER,
     src TEXT NOT NULL, dst TEXT NOT NULL, note TEXT, undone REAL
 );
+CREATE TABLE IF NOT EXISTS edit_projects (
+    key TEXT PRIMARY KEY, data TEXT NOT NULL, name TEXT, updated REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS ignored_songs (
     id INTEGER PRIMARY KEY, fingerprint BLOB NOT NULL, duration REAL, added_at REAL
 );
@@ -151,6 +154,22 @@ class DB:
             return cur.lastrowid or cur.rowcount
 
     # ---- kv ---------------------------------------------------------------
+    # ---- editor projects (saved as you go, found again by the first video's path) ----
+    def save_edit(self, key: str, data: str, name: str) -> None:
+        import time as _t
+        self.x("INSERT INTO edit_projects(key, data, name, updated) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE "
+               "SET data=excluded.data, name=excluded.name, updated=excluded.updated", (key, data, name, _t.time()))
+
+    def load_edit(self, key: str) -> str | None:
+        r = self.q("SELECT data FROM edit_projects WHERE key=?", (key,))
+        return r[0]["data"] if r else None
+
+    def recent_edits(self, n: int = 12) -> list:
+        return self.q("SELECT key, name, updated FROM edit_projects ORDER BY updated DESC LIMIT ?", (n,))
+
+    def forget_edit(self, key: str) -> None:
+        self.x("DELETE FROM edit_projects WHERE key=?", (key,))
+
     def kv_get(self, k: str, default: Any = None) -> Any:
         r = self.one("SELECT v FROM kv WHERE k=?", (k,))
         return json.loads(r["v"]) if r else default

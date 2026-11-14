@@ -43,6 +43,15 @@ KEYS = [
     ("Auto-music", [
         (["R"], "Mark the video ready (or not)"),
     ]),
+    ("Editor", [
+        (["Space"], "Play / pause the edit"),
+        (["←", "→"], "One frame back / on"),
+        (["Home", "End"], "Start / end of the edit"),
+        (["I", "O"], "Trim: the clip starts / ends at the playhead"),
+        (["Delete"], "Remove the chosen blur box or overlay"),
+        (["Ctrl+Z", "Ctrl+Y"], "Undo / redo"),
+        (["H"], "Hide the side panels: just the picture and the timeline"),
+    ]),
     ("Dialogs", [
         (["Enter"], "The main button"),
         (["Esc"], "Cancel"),

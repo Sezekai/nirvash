@@ -1535,6 +1535,8 @@ class LibraryPage(QWidget):
             srcs = db.sources(ids[0])
             if srcs:
                 m.addAction(icon("film", C["acc"]), "Play source video", lambda p=srcs[0]["video_path"]: self.open_video(p))
+                m.addAction(icon("cut", C["acc"]), "Edit source video in the editor",
+                            lambda p=srcs[0]["video_path"]: hub.editVideos.emit([p]))
         m.addSeparator()
         m.addAction(icon("trash", C["danger"]), f"Delete {n} song{s}…", lambda: self.delete(ids))
 

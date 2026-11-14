@@ -326,6 +326,10 @@ class AutoMusicPage(QWidget):
         self.open_out = button("Show exported file", "folder")
         self.open_out.clicked.connect(lambda: self.cur and self.cur.output and open_in_explorer(self.cur.output))
         row.addWidget(self.open_out)
+        self.edit_out = button("Edit in the editor", "cut", "ghost")
+        self.edit_out.setToolTip("Open the exported video (with its music) in the editor")
+        self.edit_out.clicked.connect(lambda: self.cur and self.cur.output and hub.editVideos.emit([self.cur.output]))
+        row.addWidget(self.edit_out)
         self.exp_one = button("Export this video", "export")
         self.exp_one.clicked.connect(lambda: self.cur and self.export([self.cur]))
         row.addWidget(self.exp_one)
@@ -586,6 +590,7 @@ class AutoMusicPage(QWidget):
             self.song_lay.addWidget(m)
         self._sync_controls()
         self.open_out.setVisible(bool(it.output))
+        self.edit_out.setVisible(bool(it.output))
         self._schedule_preview(immediate=True)
 
     def _sync_controls(self) -> None:

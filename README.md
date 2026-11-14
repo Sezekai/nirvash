@@ -47,8 +47,20 @@ A simple, lossless-first video tool.
 | Enter | Play the selected song |
 | V / A / E / Delete | Favourite / approve / edit audio / delete (library) |
 | R | Mark the video ready (Auto-music) |
+| I / O | Editor: trim the clip to start / end at the playhead |
+| ← → | Editor: one frame back / on |
+| Ctrl+Y | Editor: redo |
 
-**Stage 2** adds the editor (trims, joins, moving crop with tracking, zoom, rotate, blur/pixelate, overlays, colour).
+- **Editor** (0.4) — open a video (or drop one in), add more to join them, and:
+  - **Trim** each clip with handles on its sound wave (I / O at the playhead).
+  - **Join** clips in any order (drag them); mixed sizes and frame rates become the biggest size and the highest frame rate, nothing made smaller.
+  - **Crop** to any shape (16:9, 9:16, 1:1, 4:5…). **Moving crop**: move the box at different times and it glides between them; making it smaller zooms. **Follow a subject**: draw the box around something and the crop follows it (VitTrack, on the CPU).
+  - **Turn, mirror, flip and straighten** each clip.
+  - **Blur or pixelate** boxes or ovals, for part of the video or all of it, still, moving by keys, or following a subject.
+  - **Overlays** from the overlay library (`Library\Overlays`, with folders): pictures, GIFs and short videos, placed and sized on the picture, see-through, for part of the video.
+  - **Colour**: brightness, contrast, colour, shadows, warmth, tint, sharpen.
+  - **Export** next to the first video as `<name>_edited.mp4` (never overwriting). Only trims, turns and joins of matching videos are copied without re-encoding; anything that changes the picture is re-encoded once at high quality (x264, or NVENC with "Export faster").
+  - Edits are saved as you go and come back when you open the video again (Recent ▾). Ctrl+Z / Ctrl+Y undo and redo.
 
 ## Install
 
@@ -66,7 +78,7 @@ Updating = replace the `App` folder. Nothing else is touched.
 | `E:\Pictures\Nirvash\App` | the program (replaced by updates) |
 | `E:\Pictures\Nirvash\Library\Songs` | extracted songs |
 | `E:\Pictures\Nirvash\Library\Originals` | originals of songs you trimmed or whose volume changed (for undoing) |
-| `E:\Pictures\Nirvash\Library\Overlays` | overlays (Stage 2) |
+| `E:\Pictures\Nirvash\Library\Overlays` | the overlay library (pictures, GIFs, short videos, in folders) |
 | `E:\Pictures\Nirvash\Models` | AI models |
 | `E:\Pictures\Nirvash\Cache` | previews, waveforms, cover art (safe to delete) |
 | `%LOCALAPPDATA%\Nirvash` | settings, library database, themes, added fonts, logs (can be moved in Settings → Storage) |
@@ -83,4 +95,4 @@ Tests: `python -m pytest tests` (generated videos and songs only), `python tests
 
 Docs: PRODUCT.md (purpose and what differs from the shared standards), DESIGN.md and STANDARDS.md (Nirvash's copies).
 
-Bundled tools: FFmpeg (BtbN GPL build), libmpv (shinchiro), fpcalc (Chromaprint).
+Bundled tools: FFmpeg (BtbN GPL build), libmpv (shinchiro), fpcalc (Chromaprint), OpenCV (opencv-python-headless) with the VitTrack model from the OpenCV Model Zoo (Apache 2.0, `assets/models`).

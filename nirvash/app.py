@@ -52,6 +52,14 @@ def selftest(out: str) -> int:
     check("gpu", lambda: [(a.index, a.name, a.software) for a in __import__('nirvash.core.gpu', fromlist=['x']).adapters()] or "none listed")
     check("clip_tokenizer", lambda: __import__("nirvash.analysis.clip_tokenizer", fromlist=["x"]).ClipTokenizer().encode("a photo of a cat"))
 
+    def _tracker():
+        import cv2
+        from .edit.track import _tracker as make
+        t, name = make()
+        return f"{cv2.__version__}, {name}"
+
+    check("opencv_tracker", _tracker)
+
     def _ui():
         from PySide6.QtWidgets import QApplication
         app = QApplication.instance() or QApplication([])

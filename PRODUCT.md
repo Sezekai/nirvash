@@ -10,7 +10,8 @@ audio samples sent to the song lookup services the owner has turned on.
 
 - Find the music inside videos and keep it as a song library: listen, check, tidy, tag and categorise.
 - Give silent videos a fitting song, losslessly: the video stream is always copied untouched.
-- Later (Stage 2): light, mostly lossless edits.
+- Light edits (the Editor): trims, joins, crop and moving crop / zoom with subject tracking, turning, blur and
+  pixelate, overlays, colour. Lossless where nothing changes the picture; one high-quality re-encode otherwise.
 
 ## Constraints
 
@@ -37,6 +38,7 @@ audio samples sent to the song lookup services the owner has turned on.
 | STANDARDS.md: favourite key | Favourite is **V** (not F) | F is full screen everywhere in the suite |
 | Keys | Auto-music uses **R** for "ready"; the library uses **E** to edit a song's audio | Their own steps |
 | Keys | Volume is **-** and **=**, mute is **0** (not ↑ ↓) | ↑ ↓ move through the song list; the owner chose - and =, 0 sits beside them |
+| Keys | In the editor ← → step one frame, I / O trim, Ctrl+Y redo, and Ctrl+Z undoes edits (elsewhere it undoes the last move) | An editor needs frame steps and its own undo |
 | Lossless first | A volume change re-encodes the song once (same format, high bitrate), always from the kept original | The owner wants volume changes to carry over to other players; trims alone stay lossless |
 
 ## Release
