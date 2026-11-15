@@ -161,11 +161,18 @@ def shoot():
     ed = w.editor_page
     ed.open_files([str(src / "clip.mp4")])
     ed.set_tool("crop")
+    ed.crop_on.setChecked(True)
     ed.aspect.setCurrentIndex(ed.aspect.findData("9:16"))
     ed._aspect_changed()
-    ed._blur_drawn((0.62, 0.18, 0.18, 0.22))
+    ed.seek(8.0)
+    _k = ed.p.crop.keys[0]
+    ed._box_dragged("crop", "crop", (_k[1] + 0.25, _k[2] + 0.1, _k[3] * 0.7, _k[4] * 0.7), "video")
+    ed.changed()
+    ed._blur_drawn((0.1, 0.75, 0.35, 0.18), "output")
     ed.add_overlay(str(_lib[0]))
-    ed.seek(4.0)
+    ed._set_mark((2.0, 6.0))
+    ed._add_section(6.0)
+    ed.seek(9.0)
     ed.set_tool("crop")
     for width, height in ((1100, 720), (1440, 900), (1920, 1040)):
         w.resize(width, height)
@@ -174,6 +181,11 @@ def shoot():
             if key == "auto":
                 w.auto_page.table.selectRow(0)
             snap(f"{key}_{width}")
+        w.go("editor")
+        for _tool in ("blur", "sound"):
+            ed.set_tool(_tool)
+            snap(f"editor_{_tool}_{width}")
+        ed.set_tool("crop")
         w.go("library")
         w.toggle_keys()
         snap(f"keys_{width}")

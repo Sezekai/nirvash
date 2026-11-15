@@ -312,6 +312,14 @@ class Player(QWidget):
             v = min(1.0, self._volume / 100 * (10 ** (db / 20)))
             self._qt_out.setVolume(v)
 
+    def set_audio_filter(self, graph: str | None) -> None:
+        """An ffmpeg audio filter for what plays (the editor's volume changes); None removes it."""
+        if self._mpv is not None:
+            try:
+                self._mpv["af"] = f"lavfi=[{graph}]" if graph else ""
+            except Exception as e:  # noqa: BLE001 - only the preview's volume would be off
+                log.warning("preview volume filter refused: %s", e)
+
     def position(self) -> float:
         return self._pos
 

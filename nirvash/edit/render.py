@@ -150,21 +150,63 @@ def apply_blur(img: np.ndarray, b: Blur, box) -> None:
         roi[:] = out
 
 
-def apply_crop(img: np.ndarray, box, OW: int, OH: int) -> np.ndarray:
-    """Cut the box out and scale it to OW x OH, at sub-pixel positions so slow moves don't jitter."""
+def _fill_bg(img: np.ndarray, box_px, OW: int, OH: int, fill: str, colour: str) -> np.ndarray:
+    """What shows where the crop box doesn't cover the frame: a colour, or a big soft blur of the box's picture."""
+    import cv2
+    if fill != "blur":
+        c = colour.lstrip("#")
+        try:
+            r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+        except (ValueError, IndexError):
+            r = g = b = 0
+        out = np.empty((OH, OW, 3), np.uint8)
+        out[:] = (b, g, r)
+        return out
+    H, W = img.shape[:2]
+    x0, y0, x1, y1 = box_px
+    x0, y0 = max(0, int(x0)), max(0, int(y0))
+    x1, y1 = min(W, int(np.ceil(x1))), min(H, int(np.ceil(y1)))
+    src = img[y0:y1, x0:x1] if x1 - x0 > 4 and y1 - y0 > 4 else img
+    sh, sw = src.shape[:2]
+    k = max(OW / sw, OH / sh)                                      # cover the frame, keep the shape
+    small_w, small_h = max(8, OW // 12), max(8, OH // 12)
+    cov = cv2.resize(src, (max(1, int(sw * k / 12)), max(1, int(sh * k / 12))), interpolation=cv2.INTER_AREA)
+    ch, cw = cov.shape[:2]
+    oy, ox = max(0, (ch - small_h) // 2), max(0, (cw - small_w) // 2)
+    cov = cov[oy:oy + small_h, ox:ox + small_w]
+    cov = cv2.GaussianBlur(cov, (0, 0), 2.5)
+    out = cv2.resize(cov, (OW, OH), interpolation=cv2.INTER_LINEAR)
+    return (out * 0.8).astype(np.uint8)                            # a little darker, so the picture stands out
+
+
+def apply_crop(img: np.ndarray, box, OW: int, OH: int, fill: str = "blur", colour: str = "#000000") -> np.ndarray:
+    """Cut the box out and fit it into OW x OH without stretching, at sub-pixel positions so moves are smooth.
+    Where it doesn't cover the frame (a different shape, or zoomed out past the edge of the video) it's filled."""
     import cv2
     H, W = img.shape[:2]
     x, y, w, h = box
     bx, by, bw, bh = x * W, y * H, max(1e-3, w * W), max(1e-3, h * H)
-    sx, sy = OW / bw, OH / bh
-    m = np.array([[sx, 0, -bx * sx], [0, sy, -by * sy]], np.float32)
-    interp = cv2.INTER_AREA if sx < 0.7 else cv2.INTER_LINEAR
-    if interp == cv2.INTER_AREA:          # warpAffine has no area mode: shrink first, then place exactly
-        k = max(sx, sy)
-        small = cv2.resize(img, (max(1, int(W * k)), max(1, int(H * k))), interpolation=cv2.INTER_AREA)
-        m = np.array([[sx / k, 0, -bx * sx], [0, sy / k, -by * sy]], np.float32)
-        return cv2.warpAffine(small, m, (OW, OH), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-    return cv2.warpAffine(img, m, (OW, OH), flags=interp, borderMode=cv2.BORDER_CONSTANT)
+    s = min(OW / bw, OH / bh)
+    ox, oy = (OW - bw * s) / 2, (OH - bh * s) / 2
+    # where the video itself lands in the frame
+    vx0, vy0 = (0 - bx) * s + ox, (0 - by) * s + oy
+    vx1, vy1 = (W - bx) * s + ox, (H - by) * s + oy
+    covered = vx0 <= 0.5 and vy0 <= 0.5 and vx1 >= OW - 0.5 and vy1 >= OH - 0.5 and ox <= 0.5 and oy <= 0.5
+    src, k = img, 1.0
+    if s < 0.7:                                  # shrinking a lot: scale down first (area average, no shimmer)
+        k = s
+        src = cv2.resize(img, (max(1, int(W * k)), max(1, int(H * k))), interpolation=cv2.INTER_AREA)
+    m = np.array([[s / k, 0, ox - bx * s], [0, s / k, oy - by * s]], np.float32)
+    if covered:
+        return cv2.warpAffine(src, m, (OW, OH), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    out = _fill_bg(img, (bx, by, bx + bw, by + bh), OW, OH, fill, colour)
+    pic = cv2.warpAffine(src, m, (OW, OH), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    # the picture's own area: the box (fitted) and the video, whichever is smaller
+    x0, y0 = int(round(max(ox, vx0, 0))), int(round(max(oy, vy0, 0)))
+    x1, y1 = int(round(min(OW - ox, vx1, OW))), int(round(min(OH - oy, vy1, OH)))
+    if x1 > x0 and y1 > y0:
+        out[y0:y1, x0:x1] = pic[y0:y1, x0:x1]
+    return out
 
 
 class OverlaySource:
@@ -250,27 +292,37 @@ class FrameOps:
                 if src is not None:
                     self.sources[o.path] = src
 
-    def blurs(self, img: np.ndarray, t: float) -> None:
-        from .project import interp
+    def blurs(self, img: np.ndarray, t: float, space: str = "video") -> None:
+        """Blur boxes of one kind: "video" ones on the picture (before the crop), "output" ones on the frame."""
         for b in self.p.blurs:
-            if b.start <= t <= self.p.blur_end(b):
-                apply_blur(img, b, interp(b.keys, t - 0.0))
+            if b.space == space and b.start <= t <= self.p.blur_end(b):
+                box = self.p.blur_box(b, t, space)
+                if box is not None:
+                    apply_blur(img, b, box)
 
-    def finish(self, img: np.ndarray, t: float, *, crop: bool = True, overlays: bool = True) -> np.ndarray:
-        """Crop/zoom then overlays. `img` is the canvas (with blurs done)."""
-        box = self.p.crop_box(t) if crop else None
-        if box is not None:
-            OW, OH = self.out_size
-            img = apply_crop(img, box, OW, OH)
+    def crop(self, img: np.ndarray, t: float) -> np.ndarray:
+        box = self.p.crop_box(t)
+        if box is None:
+            if self.out_size != (img.shape[1], img.shape[0]):
+                import cv2
+                return cv2.resize(img, self.out_size, interpolation=cv2.INTER_AREA)
+            return img
+        OW, OH = self.out_size
+        return apply_crop(img, box, OW, OH, self.p.crop.fill, self.p.crop.fill_colour)
+
+    def overlays(self, img: np.ndarray, t: float) -> None:
+        for o in self.p.overlays:
+            if o.start <= t <= self.p.overlay_end(o) and o.path in self.sources:
+                apply_overlay(img, o, self.sources[o.path], t - o.start)
+
+    def render(self, img: np.ndarray, t: float, overlays: bool = True) -> np.ndarray:
+        """Picture blurs, crop / zoom (fitted, filled), frame blurs, overlays: the finished frame."""
+        self.blurs(img, t, "video")
+        img = self.crop(img, t)
+        self.blurs(img, t, "output")
         if overlays:
-            for o in self.p.overlays:
-                if o.start <= t <= self.p.overlay_end(o) and o.path in self.sources:
-                    apply_overlay(img, o, self.sources[o.path], t - o.start)
+            self.overlays(img, t)
         return img
-
-    def render(self, img: np.ndarray, t: float) -> np.ndarray:
-        self.blurs(img, t)
-        return self.finish(img, t)
 
 
 def preview_out_size(p: Project, canvas_w: int, canvas_h: int) -> tuple[int, int]:
@@ -333,15 +385,12 @@ def keyframe_before(path: str, t: float) -> float:
     return best
 
 
-def _audio_args(p: Project, first_input: int) -> tuple[list[str], list[str], list[str]]:
-    """Inputs, filter graph and maps for the joined sound (each clip's trimmed audio, silence where there's none)."""
+def _audio_args(p: Project, first_input: int, vol: str | None = None) -> tuple[list[str], list[str], list[str]]:
+    """Inputs, filter graph and maps for the joined sound (each clip's trimmed audio, silence where there's none),
+    with the edit's volume changes (`vol`, a filter working on the edit's time) at the end."""
     clips = p.clips
     if all(c.mute or not c.has_audio for c in clips):
         return [], [], []
-    if len(clips) == 1:
-        c = clips[0]
-        inputs = ["-ss", f"{c.start:.3f}", "-t", f"{c.length:.3f}", "-i", c.path]
-        return inputs, [], ["-map", f"{first_input}:a:0", "-c:a", "aac", "-b:a", "320k"]
     inputs, parts, graph = [], [], []
     k = first_input
     for j, c in enumerate(clips):
@@ -353,8 +402,65 @@ def _audio_args(p: Project, first_input: int) -> tuple[list[str], list[str], lis
         else:
             graph.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{c.length:.3f},asetpts=N/SR/TB[a{j}]")
         parts.append(f"[a{j}]")
-    graph.append("".join(parts) + f"concat=n={len(clips)}:v=0:a=1[aout]")
+    graph.append("".join(parts) + f"concat=n={len(clips)}:v=0:a=1,{vol or 'anull'}[aout]")
     return inputs, ["-filter_complex", ";".join(graph)], ["-map", "[aout]", "-c:a", "aac", "-b:a", "320k"]
+
+
+# ---- sound: evening out, louder / quieter --------------------------------------------------------------------------
+def measure_sound(p: Project, ctx=None):
+    """Loudness of the edit's sound as it is now (before any volume change). None when it's silent."""
+    from ..jobs.audio_edit import Loudness
+    import json as _json
+    import re as _re
+    inputs, graph, _maps = _audio_args(p, 0)
+    if not inputs:
+        return None
+    g = graph[1].replace("[aout]", ",loudnorm=print_format=json[aout]")
+    args = [ff.ffmpeg(), "-hide_banner", "-nostdin", "-v", "info"] + inputs + ["-filter_complex", g, "-map", "[aout]",
+                                                                               "-f", "null", "-"]
+    if ctx is not None:
+        ctx.progress(0.01, "Measuring the sound")
+    r = ff.run(args, timeout=3600)
+    m = _re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr.decode("utf-8", "replace"), _re.S)
+    if not m:
+        return None
+    d = _json.loads(m.group(0))
+    lufs, peak = float(d["input_i"]), float(d["input_tp"])
+    return None if lufs < -69 else Loudness(lufs, peak)
+
+
+def norm_gain(p: Project) -> float:
+    """The change that evens out the edit's sound (0 if off or not measured yet)."""
+    from ..jobs.audio_edit import Loudness, level_gain
+    snd = p.sound
+    if not snd.normalize or len(snd.measured) < 3 or snd.measured[0] != p.sound_signature():
+        return 0.0
+    if snd.measured[1] is None:
+        return 0.0
+    return level_gain(Loudness(snd.measured[1], snd.measured[2]))
+
+
+def ensure_measured(p: Project, ctx=None) -> None:
+    snd = p.sound
+    if snd.normalize and (len(snd.measured) < 3 or snd.measured[0] != p.sound_signature()):
+        l = measure_sound(p, ctx)
+        snd.measured = [p.sound_signature(), l.lufs if l else None, l.peak if l else None]
+
+
+def volume_filter(p: Project, offset: float = 0.0) -> str | None:
+    """ffmpeg filter for the volume changes. Times are the edit's; `offset` is added to the filter's own t (the
+    preview plays clip files, whose time starts elsewhere). Parts fade in and out over a twentieth of a second."""
+    snd = p.sound
+    base = snd.gain_db + norm_gain(p)
+    secs = [s for s in snd.sections if s.get("end", 0) > s.get("start", 0) and abs(s.get("gain_db", 0)) >= 0.05]
+    if not secs:
+        return f"volume={base:.2f}dB" if abs(base) >= 0.05 else None
+    tt = f"(t+{offset:.4f})" if offset >= 0 else f"(t-{-offset:.4f})"
+    r = 0.05
+    terms = [f"{s['gain_db']:.2f}*min(1\\,max(0\\,({tt}-{s['start']:.3f})/{r}))*min(1\\,max(0\\,({s['end']:.3f}-{tt})/{r}))"
+             for s in secs]
+    expr = f"pow(10\\,({base:.2f}+" + "+".join(terms) + ")/20)"
+    return f"volume=volume={expr}:eval=frame"
 
 
 def export(ctx, p: Project, out: str | None = None) -> dict:
@@ -368,6 +474,7 @@ def export(ctx, p: Project, out: str | None = None) -> dict:
     dest = unique_path(Path(out) if out else p.default_output_path())
     tmp = dest.with_name(dest.stem + ".part" + dest.suffix)
     t0 = time.time()
+    ensure_measured(p, ctx)
     plan = lossless_plan(p)
     try:
         if plan:
@@ -401,9 +508,14 @@ def _export_copy(ctx, p: Project, tmp: Path, plan: str) -> str:
         if start > 0:
             args += ["-ss", f"{start:.3f}"]
         args += ["-i", c.path, "-t", f"{c.out - start:.3f}", "-map", "0:v:0"]
+        vol = volume_filter(p)
         if c.has_audio and not c.mute:
-            args += ["-map", "0:a?"]
-        args += ["-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(tmp)]
+            args += ["-map", "0:a:0"]
+        if vol and c.has_audio and not c.mute:          # the picture is copied; only the sound is re-encoded
+            args += ["-af", vol, "-c:v", "copy", "-c:a", "aac", "-b:a", "320k"]
+        else:
+            args += ["-c", "copy"]
+        args += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(tmp)]
         ff.run_with_progress(args, c.out - start, lambda f: ctx.progress(0.02 + 0.95 * f, "Copying the video"),
                              ctx.cancel)
         note = f" (starts at the keyframe {start - c.start:+.2f} s from your start)" if c.start - start > 0.05 else ""
@@ -420,7 +532,10 @@ def _export_copy(ctx, p: Project, tmp: Path, plan: str) -> str:
             lines.append(f"outpoint {c.end:.3f}")
     lst.write_text("\n".join(lines) + "\n", encoding="utf-8")
     try:
-        args = [ff.ffmpeg(), "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy",
+        vol = volume_filter(p)
+        codec = (["-af", vol, "-c:v", "copy", "-c:a", "aac", "-b:a", "320k"] if vol
+                 else ["-c", "copy"])
+        args = [ff.ffmpeg(), "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst)] + codec + [
                 "-movflags", "+faststart", str(tmp)]
         ff.run_with_progress(args, p.duration, lambda f: ctx.progress(0.02 + 0.95 * f, "Joining the videos"),
                              ctx.cancel)
@@ -434,7 +549,7 @@ def _export_render(ctx, p: Project, tmp: Path) -> str:
     ops = FrameOps(p)
     OW, OH = ops.out_size
     total_frames = max(1, int(round(p.duration * fps)))
-    a_inputs, a_graph, a_maps = _audio_args(p, 1)
+    a_inputs, a_graph, a_maps = _audio_args(p, 1, volume_filter(p))
     enc = [ff.ffmpeg(), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{OW}x{OH}",
            "-r", f"{fps:.3f}", "-i", "pipe:0"] + a_inputs + a_graph + ["-map", "0:v:0"] + video_encoder(p) + a_maps
     enc += ["-movflags", "+faststart", str(tmp)]

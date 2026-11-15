@@ -54,11 +54,24 @@ class Clip:
         return (self.height, self.width) if self.rotate in (90, 270) else (self.width, self.height)
 
 
-Key = list  # [t, x, y, w, h]
+Key = list  # [t, x, y, w, h, mode]: mode "h" = hold (set by hand), "l" = straight line (tracking writes these)
 
 
-def interp(keys: list[Key], t: float) -> tuple[float, float, float, float] | None:
-    """Where a moving box is at time t: straight lines between keys, held before the first and after the last."""
+def _mode(k: Key) -> str:
+    return k[5] if len(k) > 5 else "l"        # keys from 0.4.0 had no mode and glided in straight lines
+
+
+def _ease(f: float) -> float:
+    f = max(0.0, min(1.0, f))
+    return f * f * (3 - 2 * f)
+
+
+def interp(keys: list[Key], t: float, transition: float = 0.0) -> tuple[float, float, float, float] | None:
+    """Where a box is at time t.
+
+    A key set by hand ("h") holds the box where it was put until the next key; the box then moves to the next key
+    over `transition` seconds, arriving exactly at that key's time (eased, so it starts and stops gently; 0 = a cut).
+    Tracked keys ("l") are followed in straight lines from one to the next."""
     if not keys:
         return None
     if len(keys) == 1 or t <= keys[0][0]:
@@ -69,41 +82,70 @@ def interp(keys: list[Key], t: float) -> tuple[float, float, float, float] | Non
     i = bisect.bisect_right(ts, t)
     a, b = keys[i - 1], keys[i]
     span = b[0] - a[0]
-    f = 0.0 if span <= 0 else (t - a[0]) / span
+    if _mode(b) == "l":
+        f = 0.0 if span <= 0 else (t - a[0]) / span
+    else:
+        tr = min(transition, span)
+        if tr <= 1e-6:
+            f = 0.0
+        else:
+            f = _ease((t - (b[0] - tr)) / tr)
     return tuple(a[j] + (b[j] - a[j]) * f for j in range(1, 5))
 
 
-def set_key(keys: list[Key], t: float, box: tuple[float, float, float, float], moving: bool, snap: float = 0.02) -> None:
-    """Change a box at time t. Not moving: the single key changes. Moving: a key at t is added or replaced."""
+def set_key(keys: list[Key], t: float, box: tuple[float, float, float, float], snap: float = 0.02) -> None:
+    """Put the box here from time t on (until the next key). At the very start it changes the starting box."""
     box = [float(v) for v in box]
-    if not moving or not keys:
-        keys[:] = [[0.0] + box] if not moving else [[t] + box]
+    if not keys:
+        keys.append([0.0] + box + ["h"])
         return
+    if t <= snap:
+        t = 0.0
     for k in keys:
         if abs(k[0] - t) <= snap:
-            k[1:5] = box
+            k[1:] = box + ["h"]
             return
-    bisect.insort(keys, [t] + box, key=lambda k: k[0])
+    bisect.insort(keys, [t] + box + ["h"], key=lambda k: k[0])
+
+
+def apply_section(keys: list[Key], a: float, b: float, box, transition: float, end: float) -> None:
+    """Keep `box` from a to b (fixing a part tracking got wrong), then go back to what was there before."""
+    old = [list(k) for k in keys]
+    after_t = min(end, b + max(transition, 0.04))
+    back = interp(old, after_t, transition) if after_t < end - 1e-3 else None
+    new = [k for k in old if k[0] < a - 1e-6]
+    new.append([a] + list(box) + ["h"])
+    new.append([b] + list(box) + ["h"])
+    if back is not None:
+        new.append([after_t] + list(back) + ["h"])
+        new += [k for k in old if k[0] > after_t + 1e-6]
+    keys[:] = new or [[0.0] + list(box) + ["h"]]
 
 
 @dataclass
 class Crop:
     enabled: bool = False
-    aspect: str = "free"
-    moving: bool = False            # keys at different times (moving crop / zoom)
-    keys: list = field(default_factory=lambda: [[0.0, 0.1, 0.1, 0.8, 0.8]])
+    aspect: str = "source"          # the finished video's shape ("source" = the same as the video)
+    keep_shape: bool = True         # resizing the box keeps that shape (off: any shape, the rest is filled)
+    fill: str = "blur"              # what fills the frame where the box doesn't: "blur" (a blurred copy) or "colour"
+    fill_colour: str = "#000000"
+    transition: float = 0.5         # seconds a move between two positions takes (0 = a cut)
+    moving: bool = False            # unused since 0.5 (kept so older saved edits load)
+    keys: list = field(default_factory=lambda: [[0.0, 0.0, 0.0, 1.0, 1.0, "h"]])
 
 
 @dataclass
 class Blur:
     id: str = field(default_factory=new_id)
+    space: str = "output"           # "output": a spot of the finished (cropped) frame; "video": on the picture itself
+                                    # (moves with what's filmed - following a subject uses this)
     kind: str = "blur"              # blur | pixelate
     strength: int = 50              # 1..100
     shape: str = "rect"             # rect | ellipse
     start: float = 0.0
     end: float = 0.0                # 0 = to the end
-    moving: bool = False
-    keys: list = field(default_factory=lambda: [[0.0, 0.4, 0.4, 0.2, 0.2]])
+    moving: bool = False            # unused since 0.5
+    keys: list = field(default_factory=lambda: [[0.0, 0.4, 0.4, 0.2, 0.2, "h"]])
 
 
 @dataclass
@@ -116,6 +158,25 @@ class Overlay:
     y: float = 0.05
     w: float = 0.25                 # width, fraction of the output width (height follows the image)
     opacity: float = 1.0
+
+
+@dataclass
+class Section:
+    id: str = field(default_factory=new_id)
+    start: float = 0.0
+    end: float = 0.0
+    gain_db: float = 6.0
+
+
+@dataclass
+class Sound:
+    normalize: bool = False         # bring the whole edit to the library's loudness (Settings > Song volume)
+    gain_db: float = 0.0            # louder / quieter, the whole edit
+    sections: list = field(default_factory=list)   # louder / quieter parts (dicts of Section)
+    measured: list = field(default_factory=list)   # [signature, LUFS, true peak] of the edit's sound
+
+    def is_neutral(self) -> bool:
+        return not self.normalize and abs(self.gain_db) < 0.05 and not self.sections
 
 
 @dataclass
@@ -147,8 +208,9 @@ class Project:
     blurs: list[Blur] = field(default_factory=list)
     overlays: list[Overlay] = field(default_factory=list)
     colour: Colour = field(default_factory=Colour)
+    sound: Sound = field(default_factory=Sound)
     output: Output = field(default_factory=Output)
-    version: int = 1
+    version: int = 2
 
     # ---- timeline -----------------------------------------------------------------------
     @property
@@ -179,24 +241,68 @@ class Project:
         return _even(w), _even(h), min(120.0, round(fps, 3))
 
     def aspect_value(self) -> float | None:
+        """The finished video's shape (width / height)."""
         a = ASPECTS.get(self.crop.aspect)
-        if a == "source":
+        if a == "source" or a is None:
             w, h, _ = self.canvas()
             return w / h
         return a
 
     def output_size(self) -> tuple[int, int]:
-        """Output width and height: the crop box's size in canvas pixels (its first key), else the canvas."""
+        """The finished video's size: the biggest frame of the chosen shape that fits in the video (no crop: the
+        video's size). Every crop box is fitted into this, so zooming never changes it."""
         W, H, _ = self.canvas()
-        if not self.crop.enabled or not self.crop.keys:
+        if not self.crop.enabled:
             return W, H
-        _t, x, y, w, h = self.crop.keys[0]
-        return max(16, _even(w * W)), max(16, _even(h * H))
+        a = self.aspect_value()
+        if W / H > a:
+            return _even(H * a), H
+        return W, _even(W / a)
 
     def crop_box(self, t: float) -> tuple[float, float, float, float] | None:
         if not self.crop.enabled:
             return None
-        return interp(self.crop.keys, t)
+        return interp(self.crop.keys, t, self.crop.transition)
+
+    def fit(self, t: float) -> tuple[float, float, float, float, float] | None:
+        """How the crop box at t lands in the finished frame: scale (output px per canvas px), the box's top left
+        in canvas px, and where its picture starts in the output (bars around it when its shape differs)."""
+        box = self.crop_box(t)
+        if box is None:
+            return None
+        W, H, _ = self.canvas()
+        OW, OH = self.output_size()
+        bx, by, bw, bh = box[0] * W, box[1] * H, max(1e-3, box[2] * W), max(1e-3, box[3] * H)
+        s = min(OW / bw, OH / bh)
+        return s, bx, by, (OW - bw * s) / 2, (OH - bh * s) / 2
+
+    def canvas_to_output(self, box, t: float):
+        """A box on the video picture -> where it is in the finished frame (fractions)."""
+        f = self.fit(t)
+        if f is None:
+            return box
+        s, bx, by, ox, oy = f
+        W, H, _ = self.canvas()
+        OW, OH = self.output_size()
+        x, y, w, h = box
+        return ((x * W - bx) * s + ox) / OW, ((y * H - by) * s + oy) / OH, w * W * s / OW, h * H * s / OH
+
+    def output_to_canvas(self, box, t: float):
+        f = self.fit(t)
+        if f is None:
+            return box
+        s, bx, by, ox, oy = f
+        W, H, _ = self.canvas()
+        OW, OH = self.output_size()
+        x, y, w, h = box
+        return ((x * OW - ox) / s + bx) / W, ((y * OH - oy) / s + by) / H, w * OW / s / W, h * OH / s / H
+
+    def blur_box(self, b: Blur, t: float, space: str):
+        """A blur box at t, in "output" or "video" (canvas) fractions."""
+        box = interp(b.keys, t, self.crop.transition)
+        if box is None or b.space == space:
+            return box
+        return self.canvas_to_output(box, t) if space == "output" else self.output_to_canvas(box, t)
 
     def blur_end(self, b: Blur) -> float:
         return b.end if b.end > 0 else self.duration
@@ -205,13 +311,16 @@ class Project:
         return o.end if o.end > 0 else self.duration
 
     # ---- what kind of export it needs ---------------------------------------------------------------
+    def sound_signature(self) -> str:
+        return json.dumps([[c.path, round(c.start, 3), round(c.out, 3), c.mute] for c in self.clips])
+
     def frame_effects(self) -> bool:
         """Anything that changes the picture itself (so the video must be re-encoded)."""
         return (self.crop.enabled or bool(self.blurs) or bool(self.overlays) or not self.colour.is_neutral()
                 or any(abs(c.angle) > 0.01 for c in self.clips))
 
     def is_empty_edit(self) -> bool:
-        return (not self.frame_effects() and len(self.clips) <= 1
+        return (not self.frame_effects() and len(self.clips) <= 1 and self.sound.is_neutral()
                 and all(c.start <= 0.01 and (c.end <= 0 or c.end >= c.duration - 0.01) and not c.rotate
                         and not c.flip_h and not c.flip_v and not c.mute for c in self.clips))
 
@@ -228,6 +337,12 @@ class Project:
         p.blurs = [Blur(**_known(Blur, b)) for b in d.get("blurs", [])]
         p.overlays = [Overlay(**_known(Overlay, o)) for o in d.get("overlays", [])]
         p.colour = Colour(**_known(Colour, d.get("colour", {})))
+        p.sound = Sound(**_known(Sound, d.get("sound", {})))
+        if d.get("version", 1) < 2 and p.crop.enabled:
+            # 0.4.0 crops: the first box set the output size; keep that shape as the output shape
+            W, H, _ = p.canvas()
+            k0 = p.crop.keys[0] if p.crop.keys else [0, 0, 0, 1, 1]
+            p.crop.aspect = _closest_aspect(k0[3] * W / max(1e-6, k0[4] * H))
         p.output = Output(**_known(Output, d.get("output", {})))
         return p
 
@@ -242,6 +357,11 @@ class Project:
         if not name.lower().endswith((".mp4", ".mkv", ".mov")):
             name += ".mp4"
         return first.with_name(name)
+
+
+def _closest_aspect(a: float) -> str:
+    best = min((k for k, v in ASPECTS.items() if isinstance(v, float)), key=lambda k: abs(ASPECTS[k] - a))
+    return best if abs(ASPECTS[best] - a) < 0.03 else "source"
 
 
 def _known(cls, d: dict) -> dict:

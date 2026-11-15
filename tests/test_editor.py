@@ -65,14 +65,34 @@ def test_project_basics():
                        Clip("b.mp4", 0, 0, duration=4, width=1920, height=1080, fps=50)])
     assert p.duration == 6 and p.clip_at(1.5) == (0, 2.5) and p.clip_at(3.0) == (1, 1.0)
     assert p.canvas() == (1920, 1080, 50.0)
-    keys = [[0.0, 0, 0, 0.5, 0.5]]
-    set_key(keys, 2.0, (0.5, 0.5, 0.5, 0.5), moving=True)
-    assert interp(keys, 1.0) == (0.25, 0.25, 0.5, 0.5)
-    set_key(keys, 9.0, (0.1, 0.1, 0.2, 0.2), moving=False)
-    assert keys == [[0.0, 0.1, 0.1, 0.2, 0.2]]
+    # a box set by hand stays put until the next one, then moves there over the transition, arriving on time
+    keys = [[0.0, 0, 0, 0.5, 0.5, "h"]]
+    set_key(keys, 2.0, (0.5, 0.5, 0.5, 0.5))
+    assert interp(keys, 1.0, 0.5) == (0, 0, 0.5, 0.5)
+    mid = interp(keys, 1.75, 0.5)
+    assert 0.2 < mid[0] < 0.3
+    assert interp(keys, 2.0, 0.5) == (0.5, 0.5, 0.5, 0.5) and interp(keys, 9.0, 0.5) == (0.5, 0.5, 0.5, 0.5)
+    assert interp(keys, 1.99, 0.0) == (0, 0, 0.5, 0.5)            # no transition: a cut
+    set_key(keys, 0.01, (0.1, 0.1, 0.2, 0.2))                        # at the very start: the starting box
+    assert keys[0] == [0.0, 0.1, 0.1, 0.2, 0.2, "h"] and len(keys) == 2
+    # tracked keys ("l") are followed in straight lines
+    tk = [[0.0, 0, 0, 0.1, 0.1, "h"], [1.0, 0.2, 0, 0.1, 0.1, "l"], [2.0, 0.4, 0, 0.1, 0.1, "l"]]
+    assert abs(interp(tk, 1.5)[0] - 0.3) < 1e-9
+    # fixing a part: the box stays from 0.5 to 1.5, then goes back to the tracked path
+    from nirvash.edit.project import apply_section
+    apply_section(tk, 0.5, 1.5, (0.9, 0.9, 0.1, 0.1), 0.25, 6.0)
+    assert interp(tk, 1.0, 0.25)[0] == 0.9 and abs(interp(tk, 1.75, 0.25)[0] - 0.35) < 0.02
+    # output: the chosen shape, as big as fits; boxes are fitted into it
     p.crop.enabled = True
-    p.crop.keys = [[0.0, 0.25, 0.25, 0.5, 0.5]]
-    assert p.output_size() == (960, 540)
+    p.crop.aspect = "1:1"
+    assert p.output_size() == (1080, 1080)
+    p.crop.aspect = "source"
+    assert p.output_size() == (1920, 1080)
+    p.crop.keys = [[0.0, 0.25, 0.25, 0.5, 0.5, "h"]]
+    box = (0.3, 0.3, 0.1, 0.1)
+    back = p.output_to_canvas(p.canvas_to_output(box, 0.0), 0.0)
+    assert all(abs(a - b) < 1e-9 for a, b in zip(back, box))
+    assert p.canvas_to_output((0.25, 0.25, 0.5, 0.5), 0) == (0.0, 0.0, 1.0, 1.0)
     q = Project.from_json(p.to_json())
     assert q.to_json() == p.to_json() and q.frame_effects()
 
@@ -143,18 +163,33 @@ def test_crop_zoom_colour_overlay(env):
     v = _halves(env / "halves.mp4")
     p = Project(clips=[clip_from_file(str(v))])
     p.crop.enabled = True
-    p.crop.keys = [[0.0, 0.5, 0.0, 0.5, 1.0]]                 # the blue half
+    p.crop.aspect = "4:3"
+    p.crop.keys = [[0.0, 0.5, 0.0, 0.5, 1.0, "h"]]                 # the blue half
     r = export(Ctx(), p)
     pr = ff.probe(r["path"])
     assert (pr.width, pr.height) == (160, 120)
     f = _frame(Path(r["path"]), 1.0).astype(int)
     assert f[..., 0].mean() > 150 and f[..., 2].mean() < 60          # blue, not red
-    # moving crop: starts on the red half, ends on the blue half
-    p.crop.moving = True
-    p.crop.keys = [[0.0, 0.0, 0.0, 0.5, 1.0], [2.5, 0.5, 0.0, 0.5, 1.0]]
+    # moves: on the red half, stays there, then glides to the blue half arriving at 2.5 s
+    p.crop.keys = [[0.0, 0.0, 0.0, 0.5, 1.0, "h"], [2.5, 0.5, 0.0, 0.5, 1.0, "h"]]
     r = export(Ctx(), p)
     assert _frame(Path(r["path"]), 0.1).astype(int)[..., 2].mean() > 150
+    assert _frame(Path(r["path"]), 1.5).astype(int)[..., 2].mean() > 150     # still held on the red half
     assert _frame(Path(r["path"]), 2.8).astype(int)[..., 0].mean() > 150
+    # a box of another shape is fitted, not stretched: the rest is filled with the chosen colour
+    p.crop.aspect = "source"                                           # 320 x 120 frame
+    p.crop.keys = [[0.0, 0.5, 0.0, 0.5, 1.0, "h"]]                     # 160 x 120 box
+    p.crop.fill, p.crop.fill_colour = "colour", "#00ff00"
+    r = export(Ctx(), p)
+    f = _frame(Path(r["path"]), 1.0).astype(int)
+    assert f.shape[:2] == (120, 320)
+    assert f[60, 160, 0] > 150 and f[60, 10, 1] > 150 and f[60, 310, 1] > 150      # blue middle, green sides
+    # zoomed out past the edges of the video: a blurred copy fills the frame there
+    p.crop.fill = "blur"
+    p.crop.keys = [[0.0, -0.5, -0.5, 2.0, 2.0, "h"]]
+    r = export(Ctx(), p)
+    f = _frame(Path(r["path"]), 1.0).astype(int)
+    assert f[5, 5].sum() > 40 and f[60, 120, 2] > 150 and f[60, 200, 0] > 150
     # colour: brighter
     p = Project(clips=[clip_from_file(str(v))])
     p.colour.brightness = 0.8
@@ -208,3 +243,39 @@ def test_overlay_library(env):
     frames, fps = ov.load_frames(str(gif), 25)
     assert len(frames) >= 9 and frames[0].shape == (48, 64, 4)
     _ = os
+
+
+def _db(path, start, dur):
+    from nirvash.media import ff
+    y = ff.decode_audio(path, 16000, start=start, duration=dur)
+    return 20 * np.log10(np.sqrt(np.mean(y ** 2)) + 1e-9)
+
+
+def test_sound_even_out_and_parts(env):
+    from nirvash.edit.project import Project, clip_from_file
+    from nirvash.edit.render import export, measure_sound, volume_filter
+    from nirvash.jobs.audio_edit import measure
+    v = env / "quiet.mp4"
+    sh("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=160x120:r=25:d=6", "-f", "lavfi", "-i",
+       "sine=f=440:d=6", "-af", "volume=-24dB", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+       "-shortest", str(v))
+    p = Project(clips=[clip_from_file(str(v))])
+    before = measure_sound(p)
+    # evened out (towards -14 LUFS), copied picture, re-encoded sound only
+    p.sound.normalize = True
+    r = export(Ctx(), p)
+    assert r["how"].startswith("copied")
+    after = measure(r["path"])
+    assert after.lufs > before.lufs + 4, (before, after)
+    # louder for 2..4 s only
+    p.sound.normalize = False
+    p.sound.sections = [{"id": "x", "start": 2.0, "end": 4.0, "gain_db": 10.0}]
+    assert "eval=frame" in volume_filter(p)
+    r = export(Ctx(), p)
+    inside, outside = _db(r["path"], 2.3, 1.4), _db(r["path"], 0.3, 1.4)
+    assert 8 < inside - outside < 12, (inside, outside)
+    # the same through a full re-encode (crop on)
+    p.crop.enabled = True
+    r = export(Ctx(), p)
+    inside, outside = _db(r["path"], 2.3, 1.4), _db(r["path"], 4.3, 1.4)
+    assert 8 < inside - outside < 12, (inside, outside)

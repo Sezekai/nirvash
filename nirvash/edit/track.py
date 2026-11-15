@@ -54,7 +54,7 @@ def track(ctx, p: Project, keys: list, t0: float, t1: float, smooth: float = 0.2
     W, H, fps = p.canvas()
     aw = ANALYSIS_W if W > ANALYSIS_W else W
     ah = max(2, int(round(H * aw / W / 2)) * 2)
-    box = interp(keys, t0)
+    box = interp(keys, t0, p.crop.transition)
     if box is None:
         raise ValueError("draw the box first")
     bx, by, bw, bh = box
@@ -121,8 +121,9 @@ def track(ctx, p: Project, keys: list, t0: float, t1: float, smooth: float = 0.2
     win = max(1, int(fps * smooth))
     xs, ys = _smooth(xy[:, 0], win), _smooth(xy[:, 1], win)
     xs[0], ys[0] = xy[0]                                     # starts exactly where you drew it
-    new = [[float(tt), float(min(1 - bw, max(0.0, x - bw / 2))), float(min(1 - bh, max(0.0, y - bh / 2))), bw, bh]
-           for tt, x, y in zip(out_t, xs, ys)]
+    # tracked keys are followed in straight lines ("l"); the first is where you put the box ("h")
+    new = [[float(tt), float(x - bw / 2), float(y - bh / 2), bw, bh, "l"] for tt, x, y in zip(out_t, xs, ys)]
+    new[0][5] = "h"
     step = max(1, int(round(fps / 15)))                      # about 15 keys a second is smooth enough
     new = new[::step] + ([new[-1]] if (len(new) - 1) % step else [])
     until = out_t[-1]

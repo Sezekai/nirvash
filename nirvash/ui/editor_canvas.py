@@ -26,18 +26,20 @@ def to_qimage(img: np.ndarray) -> QImage:
     return q.copy()
 
 
-# ---- the picture --------------------------------------------------------------------------------------------------
+# ---- the picture ----------------------------------------------------------------------------------------------------
 class FrameCanvas(QWidget):
-    """Shows the frame at the playhead. In edit view it's the whole picture, with the crop box, blur boxes and
-    overlays drawn on it to move and resize; in result view (and while playing) it's exactly what gets exported.
+    """Shows the frame at the playhead, two ways:
 
-    boxChanged(kind, id, (x, y, w, h)) - while dragging; boxCommitted() on release; boxPicked(kind, id) on click;
-    boxDrawn((x, y, w, h)) when a new blur box is drawn on empty picture."""
+    - "result": the finished frame (cropped, zoomed, blurred), with overlays and blur boxes to drag on it;
+    - "whole": the whole video picture, with the crop box to move and resize (it can go past the edges to zoom out).
 
-    boxChanged = Signal(str, str, object)
+    boxChanged(kind, id, box, space) while dragging, box in `space` ("output" or "video" fractions);
+    boxCommitted() on release; boxPicked(kind, id) on click; boxDrawn(box, space) for a new blur box."""
+
+    boxChanged = Signal(str, str, object, str)
     boxCommitted = Signal()
     boxPicked = Signal(str, str)
-    boxDrawn = Signal(object)
+    boxDrawn = Signal(object, str)
 
     H = 6   # handle half size
 
@@ -48,23 +50,33 @@ class FrameCanvas(QWidget):
         self.setFocusPolicy(Qt.ClickFocus)
         self.project: Project | None = None
         self.t = 0.0
-        self.base: np.ndarray | None = None      # canvas frame (colour etc. done), preview size
+        self.base: np.ndarray | None = None      # the video picture (colour etc. done), preview size
         self.image: QImage | None = None
-        self.result = False
+        self.view = "result"
         self.tool = "clip"
         self.selected: tuple[str, str] | None = None
         self.ops: R.FrameOps | None = None
         self._drag = None
+        self._temp_new = None
         self._overlay_pm: dict = {}
         self.message = ""
+
+    @property
+    def space(self) -> str:
+        """The coordinates of what's on screen."""
+        return "video" if self.view == "whole" else "output"
 
     # ---- content ---------------------------------------------------------------------------
     def set_project(self, p: Project | None) -> None:
         self.project = p
         self.refresh_ops()
 
+    def set_view(self, view: str) -> None:
+        if view != self.view:
+            self.view = view
+            self.recompose()
+
     def refresh_ops(self) -> None:
-        """Project changed: rebuild what draws the moving parts (cheap), then the picture."""
         p = self.project
         if p is None or not p.clips:
             self.ops = None
@@ -92,9 +104,11 @@ class FrameCanvas(QWidget):
             return
         img = self.base.copy()
         try:
-            self.ops.blurs(img, self.t)
-            if self.result:
-                img = self.ops.finish(img, self.t)
+            if self.view == "whole":
+                self.ops.blurs(img, self.t, "video")
+            else:
+                img = self.ops.render(img, self.t, overlays=False)
+            self.message = ""
         except Exception as e:  # noqa: BLE001 - a bad box mustn't take the editor down
             self.message = f"Preview problem: {e}"
         self.image = to_qimage(img)
@@ -102,10 +116,13 @@ class FrameCanvas(QWidget):
 
     # ---- geometry ------------------------------------------------------------------------------
     def pic_rect(self) -> QRectF:
+        """Where the picture is drawn. Cropping leaves room around it, so the box can go past the edges."""
         if self.image is None:
             return QRectF(self.rect())
         iw, ih = self.image.width(), self.image.height()
-        k = min(self.width() / iw, self.height() / ih)
+        pad = 0.16 if (self.view == "whole" and self.tool == "crop") else 0.0
+        aw, ah = self.width() * (1 - 2 * pad), self.height() * (1 - 2 * pad)
+        k = min(aw / iw, ah / ih)
         w, h = iw * k, ih * k
         return QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h)
 
@@ -118,43 +135,47 @@ class FrameCanvas(QWidget):
         r = self.pic_rect()
         return (pt.x() - r.x()) / max(1, r.width()), (pt.y() - r.y()) / max(1, r.height())
 
+    def _convert(self, box, frm: str, to: str):
+        if frm == to or box is None:
+            return box
+        p = self.project
+        return p.canvas_to_output(box, self.t) if to == "output" else p.output_to_canvas(box, self.t)
+
     def overlay_box(self, o) -> tuple[float, float, float, float]:
-        """An overlay's place on the canvas (overlays are placed on the output frame, inside the crop)."""
+        """An overlay's box in output fractions (its height follows the picture's shape)."""
         p = self.project
         src = self.ops.sources.get(o.path) if self.ops else None
         aspect = src.aspect() if src else 1.0
         OW, OH = p.output_size()
-        h = o.w * OW * aspect / OH
-        box = p.crop_box(self.t) if not self.result else None
-        if box is None:
-            return o.x, o.y, o.w, h
-        cx, cy, cw, ch = box
-        return cx + o.x * cw, cy + o.y * ch, o.w * cw, h * ch
+        return o.x, o.y, o.w, o.w * OW * aspect / OH
 
     def items(self) -> list[tuple[str, str, tuple]]:
-        """What can be dragged now, topmost last."""
+        """What can be dragged now (in screen space), topmost last."""
         p = self.project
         out = []
-        if p is None or self.result:
+        if p is None:
             return out
-        if self.tool == "crop" and p.crop.enabled:
+        sp = self.space
+        if self.tool == "crop" and p.crop.enabled and self.view == "whole":
             b = p.crop_box(self.t)
             if b:
                 out.append(("crop", "crop", b))
         if self.tool == "blur":
             for b in p.blurs:
                 if b.start <= self.t <= p.blur_end(b):
-                    out.append(("blur", b.id, interp(b.keys, self.t)))
+                    box = p.blur_box(b, self.t, sp)
+                    if box is not None:
+                        out.append(("blur", b.id, box))
         if self.tool == "overlay":
             for o in p.overlays:
                 if o.start <= self.t <= p.overlay_end(o):
-                    out.append(("overlay", o.id, self.overlay_box(o)))
+                    out.append(("overlay", o.id, self._convert(self.overlay_box(o), "output", sp)))
         return out
 
     # ---- drawing -----------------------------------------------------------------------------------
     def paintEvent(self, _e):  # noqa: N802
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(C["stage"] if "stage" in C else "#05060a"))
+        p.fillRect(self.rect(), QColor(C.get("stage", "#05060a")))
         pr = self.project
         if self.image is None:
             p.setPen(QColor(C["faint"]))
@@ -163,57 +184,57 @@ class FrameCanvas(QWidget):
         r = self.pic_rect()
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.drawImage(r, self.image)
-        if self.result or pr is None:
+        if pr is None:
             return
         p.setRenderHint(QPainter.Antialiasing)
-        # where the crop is: everything outside it dimmed (always shown, so you see the framing in any tool)
-        box = pr.crop_box(self.t)
-        if box is not None:
+        sp = self.space
+        if self.view == "whole" and pr.crop.enabled:
+            box = pr.crop_box(self.t)
             cr = self._to_px(box)
             path = QPainterPath()
-            path.addRect(r)
+            path.addRect(QRectF(self.rect()))
             path.addRect(cr)
-            dim = QColor(0, 0, 0, 140 if self.tool == "crop" else 90)
-            p.fillPath(path, dim)
-            p.setPen(QPen(QColor(C["acc"]), 1.5, Qt.SolidLine if self.tool == "crop" else Qt.DashLine))
+            p.fillPath(path, QColor(0, 0, 0, 150 if self.tool == "crop" else 100))
+            p.setPen(QPen(QColor(C["acc"]), 1.5))
             p.setBrush(Qt.NoBrush)
             p.drawRect(cr)
-            if self.tool == "crop":     # rule of thirds
-                p.setPen(QPen(QColor(255, 255, 255, 60), 1))
-                for k in (1, 2):
-                    p.drawLine(QPointF(cr.x() + cr.width() * k / 3, cr.y()), QPointF(cr.x() + cr.width() * k / 3, cr.bottom()))
-                    p.drawLine(QPointF(cr.x(), cr.y() + cr.height() * k / 3), QPointF(cr.right(), cr.y() + cr.height() * k / 3))
-        # overlays (edit view draws them here; the picture itself doesn't include them)
-        for o in pr.overlays:
-            if not (o.start <= self.t <= pr.overlay_end(o)) or self.ops is None or o.path not in self.ops.sources:
-                continue
-            pm = self._overlay_pixmap(o)
-            if pm is not None:
-                p.setOpacity(o.opacity)
-                p.drawPixmap(self._to_px(self.overlay_box(o)).toRect(), pm)
-                p.setOpacity(1.0)
-        # boxes of the current tool
+            p.setPen(QPen(QColor(255, 255, 255, 60), 1))
+            for k in (1, 2):
+                p.drawLine(QPointF(cr.x() + cr.width() * k / 3, cr.y()), QPointF(cr.x() + cr.width() * k / 3, cr.bottom()))
+                p.drawLine(QPointF(cr.x(), cr.y() + cr.height() * k / 3), QPointF(cr.right(), cr.y() + cr.height() * k / 3))
+            p.setPen(QPen(QColor(C["sec"]), 1, Qt.DotLine))           # the video's own edges
+            p.drawRect(r)
+        # overlays, drawn here so they move smoothly while dragged (they're part of the exported picture)
+        if self.ops is not None:
+            for o in pr.overlays:
+                if not (o.start <= self.t <= pr.overlay_end(o)) or o.path not in self.ops.sources:
+                    continue
+                pm = self._overlay_pixmap(o)
+                if pm is not None:
+                    p.setOpacity(o.opacity)
+                    p.drawPixmap(self._to_px(self._convert(self.overlay_box(o), "output", sp)).toRect(), pm)
+                    p.setOpacity(1.0)
         for kind, iid, b in self.items():
             rr = self._to_px(b)
-            sel = self.selected == (kind, iid)
-            col = QColor(C["acc"]) if kind != "blur" else QColor(C["warn"])
+            sel = self.selected == (kind, iid) or kind == "crop"
+            col = QColor(C["warn"] if kind == "blur" else C["acc"])
             p.setPen(QPen(col, 2 if sel else 1.2, Qt.SolidLine if sel else Qt.DashLine))
             p.setBrush(Qt.NoBrush)
-            if kind == "blur" and next((x for x in pr.blurs if x.id == iid), None) is not None and \
-                    next(x for x in pr.blurs if x.id == iid).shape == "ellipse":
-                p.drawEllipse(rr)
-                p.setPen(QPen(col, 1, Qt.DotLine))
+            if kind == "blur":
+                bl = next((x for x in pr.blurs if x.id == iid), None)
+                if bl is not None and bl.shape == "ellipse":
+                    p.drawEllipse(rr)
+                    p.setPen(QPen(col, 1, Qt.DotLine))
             p.drawRect(rr)
-            if sel or kind == "crop":
+            if sel:
                 p.setPen(Qt.NoPen)
                 p.setBrush(col)
                 for hx, hy in self._handles(rr):
                     p.drawRect(QRectF(hx - self.H, hy - self.H, self.H * 2, self.H * 2))
-        tn = getattr(self, "_temp_new", None)
-        if tn:
-            p.setPen(QPen(QColor(C["warn"]), 1.5, Qt.DashLine))
-            p.setBrush(Qt.NoBrush)
-            p.drawRect(self._to_px(tn))
+        if self._temp_new:
+            p.setPen(QPen(QColor(C["warn"]), 2, Qt.DashLine))
+            p.setBrush(QColor(255, 191, 90, 40))
+            p.drawRect(self._to_px(self._temp_new))
         if self.message:
             p.setPen(QColor(C["warn"]))
             p.drawText(self.rect().adjusted(8, 8, -8, -8), Qt.AlignLeft | Qt.AlignBottom, self.message)
@@ -244,10 +265,10 @@ class FrameCanvas(QWidget):
     def _hit(self, pos: QPointF):
         for kind, iid, b in reversed(self.items()):
             rr = self._to_px(b)
-            for n, (hx, hy) in enumerate(self._handles(rr)):
-                if abs(pos.x() - hx) <= self.H + 3 and abs(pos.y() - hy) <= self.H + 3 and \
-                        (self.selected == (kind, iid) or kind == "crop"):
-                    return kind, iid, b, n
+            if self.selected == (kind, iid) or kind == "crop":
+                for n, (hx, hy) in enumerate(self._handles(rr)):
+                    if abs(pos.x() - hx) <= self.H + 3 and abs(pos.y() - hy) <= self.H + 3:
+                        return kind, iid, b, n
             if rr.contains(pos):
                 return kind, iid, b, None
         return None
@@ -265,8 +286,9 @@ class FrameCanvas(QWidget):
             self._drag = {"kind": kind, "id": iid, "start": self._to_norm(pos), "box": b, "handle": handle}
         elif self.tool == "blur" and self.pic_rect().contains(pos):
             x, y = self._to_norm(pos)
-            self._drag = {"kind": "new", "start": (x, y), "box": (x, y, 0.0, 0.0), "handle": 8}
-        else:
+            self._drag = {"kind": "new", "start": (x, y)}
+            self._temp_new = (x, y, 0.0, 0.0)
+        elif self.selected is not None:
             self.selected = None
             self.boxPicked.emit("", "")
         self.update()
@@ -287,48 +309,49 @@ class FrameCanvas(QWidget):
         d = self._drag
         x, y = self._to_norm(pos)
         sx, sy = d["start"]
+        if d["kind"] == "new":                              # drawing a new box: shown as it's drawn
+            x, y = max(0.0, min(1.0, x)), max(0.0, min(1.0, y))
+            self._temp_new = (min(sx, x), min(sy, y), abs(x - sx), abs(y - sy))
+            self.update()
+            return
         bx, by, bw, bh = d["box"]
         dx, dy = x - sx, y - sy
         h = d["handle"]
-        if d["kind"] == "new":
-            nb = (min(sx, x), min(sy, y), abs(x - sx), abs(y - sy))
-            d["box"] = nb
-            self._temp_new = nb
-            self.update()
-            return
-        if h is None:                                       # move
-            nb = (min(1 - bw, max(0.0, bx + dx)), min(1 - bh, max(0.0, by + dy)), bw, bh)
-        else:                                               # resize from a handle
+        lo, hi = (-1.5, 2.5) if d["kind"] == "crop" else (0.0, 1.0)     # the crop can reach past the edges
+        if h is None:
+            nx, ny = bx + dx, by + dy
+            if d["kind"] != "crop":
+                nx, ny = min(1 - bw, max(0.0, nx)), min(1 - bh, max(0.0, ny))
+            nb = (nx, ny, bw, bh)
+        else:
             l, t, r, b = bx, by, bx + bw, by + bh
             if h in (0, 3, 5):
-                l = min(r - 0.02, max(0.0, bx + dx))
+                l = min(r - 0.02, max(lo, bx + dx))
             if h in (2, 4, 7):
-                r = max(l + 0.02, min(1.0, bx + bw + dx))
+                r = max(l + 0.02, min(hi, bx + bw + dx))
             if h in (0, 1, 2):
-                t = min(b - 0.02, max(0.0, by + dy))
+                t = min(b - 0.02, max(lo, by + dy))
             if h in (5, 6, 7):
-                b = max(t + 0.02, min(1.0, by + bh + dy))
-            nb = (l, t, r - l, b - t)
-            nb = self._keep_aspect(d, nb, h)
-        self.boxChanged.emit(d["kind"], d["id"], nb)
+                b = max(t + 0.02, min(hi, by + bh + dy))
+            nb = self._keep_aspect(d, (l, t, r - l, b - t), h)
+        self.boxChanged.emit(d["kind"], d["id"], nb, self.space)
 
     def _keep_aspect(self, d, nb, h):
-        """The crop keeps its chosen shape; overlays keep the picture's shape."""
+        """The crop keeps the finished video's shape (unless that's turned off); overlays keep their picture's."""
         p = self.project
         x, y, w, hh = nb
         if self.image is None:
             return nb
         pw, ph = self.image.width(), self.image.height()
         if d["kind"] == "crop":
+            if not p.crop.keep_shape:
+                return nb
             a = p.aspect_value()
         elif d["kind"] == "overlay":
             ob = d["box"]
             a = (ob[2] * pw) / max(1e-6, ob[3] * ph)
         else:
             return nb
-        if not a:
-            return nb
-        # aspect in normalized units: w*pw / (h*ph) = a
         if h in (1, 6):                       # top/bottom edge: width follows height
             w2 = hh * ph * a / pw
             cx = x + w / 2
@@ -338,14 +361,6 @@ class FrameCanvas(QWidget):
             if h in (0, 1, 2):
                 y = y + hh - h2
             hh = h2
-        if w > 1:
-            w = 1.0
-            hh = w * pw / a / ph
-        if hh > 1:
-            hh = 1.0
-            w = hh * ph * a / pw
-        x = min(1 - w, max(0.0, x))
-        y = min(1 - hh, max(0.0, y))
         return x, y, w, hh
 
     def mouseReleaseEvent(self, e):  # noqa: N802
@@ -354,10 +369,10 @@ class FrameCanvas(QWidget):
         if d is None:
             return
         if d["kind"] == "new":
+            b = self._temp_new
             self._temp_new = None
-            b = d["box"]
-            if b[2] > 0.01 and b[3] > 0.01:
-                self.boxDrawn.emit(b)
+            if b and b[2] > 0.01 and b[3] > 0.01:
+                self.boxDrawn.emit(b, self.space)
             self.update()
             return
         self.boxCommitted.emit()
@@ -372,6 +387,7 @@ class Timeline(QWidget):
     picked = Signal(str, str)
     rangeChanged = Signal(str, str, float, float)
     committed = Signal()
+    marked = Signal(object)          # (start, end) of the marked part, or None
 
     LANE = 20
     RULER = 16
@@ -381,9 +397,11 @@ class Timeline(QWidget):
         self.project: Project | None = None
         self.t = 0.0
         self.selected: tuple[str, str] | None = None
+        self.mark: tuple[float, float] | None = None
         self._drag = None
         self.setMouseTracking(True)
         self.setMinimumHeight(self.RULER + self.LANE * 2 + 8)
+        self.setToolTip("Click to move the playhead. Drag along the times at the top to mark a part.")
 
     def lanes(self) -> list[tuple[str, str, str]]:
         p = self.project
@@ -396,6 +414,8 @@ class Timeline(QWidget):
             out.append(("blur", b.id, f"{'Pixelate' if b.kind == 'pixelate' else 'Blur'} {i + 1}"))
         for o in p.overlays:
             out.append(("overlay", o.id, Path(o.path).stem or "Overlay"))
+        if p.sound.sections:
+            out.append(("sound", "", "Sound"))
         return out
 
     def set_project(self, p: Project | None) -> None:
@@ -431,6 +451,15 @@ class Timeline(QWidget):
             p.drawLine(QPointF(x, self.RULER - 4), QPointF(x, self.RULER))
             p.drawText(QRectF(x - 30, 0, 60, self.RULER - 3), Qt.AlignCenter, fmt_time(t))
             t += step
+        if self.mark is not None:
+            a, b = self.mark
+            band = QColor(C["acc"])
+            band.setAlpha(40)
+            p.fillRect(QRectF(self._x(a), 0, max(2.0, self._x(b) - self._x(a)), self.height()), band)
+            p.setPen(QPen(QColor(C["acc"]), 1.5))
+            p.drawLine(QPointF(self._x(a), 0), QPointF(self._x(b), 0))
+            p.drawLine(QPointF(self._x(a), 0), QPointF(self._x(a), self.RULER))
+            p.drawLine(QPointF(self._x(b), 0), QPointF(self._x(b), self.RULER))
         stops = T["stops"]
         for n, (kind, iid, name) in enumerate(self.lanes()):
             y = self.RULER + 4 + n * self.LANE
@@ -451,14 +480,36 @@ class Timeline(QWidget):
                     p.drawText(r.adjusted(4, 0, -2, 0), Qt.AlignVCenter | Qt.AlignLeft,
                                p.fontMetrics().elidedText(Path(c.path).name, Qt.ElideRight, int(r.width()) - 6))
             elif kind == "crop":
+                mid = y + self.LANE / 2 - 1
                 p.setPen(QPen(QColor(C["acc"]), 1))
-                p.drawLine(QPointF(self._x(0), y + self.LANE / 2 - 1), QPointF(self._x(d), y + self.LANE / 2 - 1))
+                p.drawLine(QPointF(self._x(0), mid), QPointF(self._x(d), mid))
+                keys = pr.crop.keys
+                # followed (tracked) stretches as a thick line, keys set by hand as diamonds
+                p.setPen(QPen(QColor(C["violet"]), 4))
+                for k0, k1 in zip(keys, keys[1:]):
+                    if len(k1) > 5 and k1[5] == "l":
+                        p.drawLine(QPointF(self._x(k0[0]), mid), QPointF(self._x(k1[0]), mid))
+                p.setPen(Qt.NoPen)
                 p.setBrush(QColor(C["acc"]))
-                keys = pr.crop.keys if pr.crop.moving else pr.crop.keys[:1]
-                for k in keys[:: max(1, len(keys) // 200)]:
+                for k in keys:
+                    if len(k) > 5 and k[5] == "l":
+                        continue
                     x = self._x(k[0])
-                    p.drawPolygon([QPointF(x, y + 3), QPointF(x + 4, y + self.LANE / 2 - 1), QPointF(x, y + self.LANE - 5),
-                                   QPointF(x - 4, y + self.LANE / 2 - 1)])
+                    p.drawPolygon([QPointF(x, y + 3), QPointF(x + 4, mid), QPointF(x, y + self.LANE - 5),
+                                   QPointF(x - 4, mid)])
+            elif kind == "sound":
+                for sec in pr.sound.sections:
+                    g = sec.get("gain_db", 0)
+                    col = QColor(C["ok"] if g >= 0 else C["blue"])
+                    sel_s = self.selected == ("sound", sec.get("id"))
+                    col.setAlpha(170 if sel_s else 90)
+                    r = QRectF(self._x(sec["start"]), y + 2, max(3.0, self._x(sec["end"]) - self._x(sec["start"])),
+                               self.LANE - 6)
+                    p.setPen(QPen(QColor(C["text"]), 1.2) if sel_s else Qt.NoPen)
+                    p.setBrush(col)
+                    p.drawRoundedRect(r, 3, 3)
+                    p.setPen(QColor(C["text"]))
+                    p.drawText(r.adjusted(4, 0, -2, 0), Qt.AlignVCenter | Qt.AlignLeft, f"{g:+.0f} dB")
             else:
                 it = next((b for b in (pr.blurs if kind == "blur" else pr.overlays) if b.id == iid), None)
                 if it is None:
@@ -484,28 +535,46 @@ class Timeline(QWidget):
         lanes = self.lanes()
         return lanes[n] if 0 <= n < len(lanes) and y >= self.RULER else None
 
+    def _items(self, kind: str):
+        p = self.project
+        if kind == "blur":
+            return [(b.id, b.start, p.blur_end(b)) for b in p.blurs]
+        if kind == "overlay":
+            return [(o.id, o.start, p.overlay_end(o)) for o in p.overlays]
+        if kind == "sound":
+            return [(s.get("id"), s["start"], s["end"]) for s in p.sound.sections]
+        return []
+
     def mousePressEvent(self, e):  # noqa: N802
         if self.project is None or e.button() != Qt.LeftButton:
             return
         pos = e.position()
+        if pos.y() < self.RULER:                            # along the times: mark a part
+            t = self._t(pos.x())
+            self._drag = ("mark", t)
+            self.mark = None
+            self.marked.emit(None)
+            self.seek.emit(t)
+            self.update()
+            return
         lane = self._lane_at(pos.y())
-        if lane and lane[0] in ("blur", "overlay"):
-            it = next((b for b in (self.project.blurs if lane[0] == "blur" else self.project.overlays)
-                       if b.id == lane[1]), None)
-            if it is not None:
-                end = self.project.blur_end(it) if lane[0] == "blur" else self.project.overlay_end(it)
-                xa, xb = self._x(it.start), self._x(end)
+        if lane and lane[0] in ("blur", "overlay", "sound"):
+            for iid, a, b in self._items(lane[0]):
+                if lane[0] != "sound" and iid != lane[1]:
+                    continue
+                xa, xb = self._x(a), self._x(b)
                 if abs(pos.x() - xa) < 6 or abs(pos.x() - xb) < 6:
-                    self._drag = ("edge", lane[0], lane[1], "a" if abs(pos.x() - xa) < abs(pos.x() - xb) else "b")
-                    self.selected = (lane[0], lane[1])
-                    self.picked.emit(lane[0], lane[1])
+                    self._drag = ("edge", lane[0], iid, "a" if abs(pos.x() - xa) < abs(pos.x() - xb) else "b")
+                    self.selected = (lane[0], iid)
+                    self.picked.emit(lane[0], iid)
+                    self.update()
                     return
                 if xa <= pos.x() <= xb:
-                    self.selected = (lane[0], lane[1])
-                    self.picked.emit(lane[0], lane[1])
+                    self.selected = (lane[0], iid)
+                    self.picked.emit(lane[0], iid)
+                    break
         elif lane and lane[0] == "clips":
-            t = self._t(pos.x())
-            i, _ = self.project.clip_at(t)
+            i, _ = self.project.clip_at(self._t(pos.x()))
             self.selected = ("clip", str(i))
             self.picked.emit("clip", str(i))
         self._drag = ("seek",)
@@ -514,27 +583,34 @@ class Timeline(QWidget):
     def mouseMoveEvent(self, e):  # noqa: N802
         pos = e.position()
         if self._drag is None:
-            lane = self._lane_at(pos.y())
             cur = Qt.PointingHandCursor
-            if lane and lane[0] in ("blur", "overlay") and self.project is not None:
-                it = next((b for b in (self.project.blurs if lane[0] == "blur" else self.project.overlays)
-                           if b.id == lane[1]), None)
-                if it is not None:
-                    end = self.project.blur_end(it) if lane[0] == "blur" else self.project.overlay_end(it)
-                    if min(abs(pos.x() - self._x(it.start)), abs(pos.x() - self._x(end))) < 6:
-                        cur = Qt.SizeHorCursor
+            if pos.y() < self.RULER:
+                cur = Qt.IBeamCursor
+            else:
+                lane = self._lane_at(pos.y())
+                if lane and lane[0] in ("blur", "overlay", "sound") and self.project is not None:
+                    for iid, a, b in self._items(lane[0]):
+                        if (lane[0] == "sound" or iid == lane[1]) and \
+                                min(abs(pos.x() - self._x(a)), abs(pos.x() - self._x(b))) < 6:
+                            cur = Qt.SizeHorCursor
             self.setCursor(cur)
             return
         if self._drag[0] == "seek":
             self.seek.emit(self._t(pos.x()))
+        elif self._drag[0] == "mark":
+            t0, t1 = self._drag[1], self._t(pos.x())
+            if abs(t1 - t0) > 0.05:
+                self.mark = (min(t0, t1), max(t0, t1))
+                self.marked.emit(self.mark)
+                self.update()
         else:
             _e, kind, iid, side = self._drag
-            it = next((b for b in (self.project.blurs if kind == "blur" else self.project.overlays) if b.id == iid), None)
+            it = next(((a, b) for i, a, b in self._items(kind) if i == iid), None)
             if it is None:
                 return
-            end = self.project.blur_end(it) if kind == "blur" else self.project.overlay_end(it)
+            a0, b0 = it
             t = self._t(pos.x())
-            a, b = (min(t, end - 0.1), end) if side == "a" else (it.start, max(t, it.start + 0.1))
+            a, b = (min(t, b0 - 0.1), b0) if side == "a" else (a0, max(t, a0 + 0.1))
             self.rangeChanged.emit(kind, iid, a, b)
 
     def mouseReleaseEvent(self, e):  # noqa: N802
@@ -664,5 +740,8 @@ class PreviewPlayer:
         src = c.start + (t - self.p.clip_offset(i))
         try:
             self.audio.load(c.path, play=True, start=src)
+            # the edit's volume changes, in this clip file's own time
+            vol = R.volume_filter(self.p, offset=self.p.clip_offset(i) - c.start)
+            self.audio.set_audio_filter(vol)
         except Exception:
             pass

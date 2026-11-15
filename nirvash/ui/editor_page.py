@@ -17,7 +17,7 @@ from ..core import log as _log
 from ..core.db import get_db
 from ..edit import overlays as ovl
 from ..edit import render as R
-from ..edit.project import ASPECTS, Blur, Overlay, Project, clip_from_file, interp, set_key
+from ..edit.project import ASPECTS, Blur, Overlay, Project, Section, apply_section, clip_from_file, interp, set_key
 from . import dialogs, theme, workers
 from .audio_editor import RangeWave, fmt_precise, parse_time
 from .editor_canvas import FrameCanvas, PreviewPlayer, Timeline
@@ -32,7 +32,7 @@ log = _log.get("editor")
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv", ".flv", ".ts", ".mts", ".m2ts", ".3gp", ".gif"}
 TOOLS = [("clip", "Clips"), ("crop", "Crop"), ("blur", "Blur"), ("overlay", "Overlays"), ("colour", "Colour"),
-         ("export", "Export")]
+         ("sound", "Sound"), ("export", "Export")]
 
 
 def _slider(lo: int, hi: int, val: int) -> QSlider:
@@ -56,6 +56,8 @@ class EditorPage(QWidget):
         self._grab_token = 0
         self._last_saved = ""
         self.sel: tuple[str, str] | None = None
+        self.mark: tuple[float, float] | None = None    # a marked part of the timeline
+        self.tool = "clip"
         self.queue = get_queue()
 
         root = QVBoxLayout(self)
@@ -78,6 +80,10 @@ class EditorPage(QWidget):
         bar.addWidget(self.recent_btn)
         self.name_lbl = label("", "muted")
         bar.addWidget(self.name_lbl, 1)
+        self.reset_btn = button("Start over…", "trash", "ghost")
+        self.reset_btn.setToolTip("Throw away every edit of this video and start again from the original")
+        self.reset_btn.clicked.connect(self.start_over)
+        bar.addWidget(self.reset_btn)
         self.undo_btn = button("Undo", "undo", "ghost")
         self.undo_btn.setToolTip("Undo (Ctrl+Z)")
         self.undo_btn.clicked.connect(self.undo)
@@ -227,17 +233,37 @@ class EditorPage(QWidget):
         self.time_lbl = label("0:00.00 / 0:00", "mono")
         tr.addWidget(self.time_lbl)
         tr.addStretch(1)
-        self.result_box = QCheckBox("Show the result")
-        self.result_box.setToolTip("See exactly what will be exported (cropped, with overlays). Off: the whole "
-                                   "picture with the boxes to move")
-        self.result_box.toggled.connect(self._result_toggled)
-        tr.addWidget(self.result_box)
+        self.whole_box = QCheckBox("Whole picture")
+        self.whole_box.setToolTip("Show the whole video instead of the finished (cropped) frame. Cropping always "
+                                  "shows the whole picture.")
+        self.whole_box.toggled.connect(lambda _v: self._update_view())
+        tr.addWidget(self.whole_box)
+        l.addLayout(tr)
+        tr = QHBoxLayout()
+        tr.setSpacing(6)
+        tr.addWidget(label("Part", "cap"))
+        ms = button("Starts here", "tri_down", "ghost")
+        ms.setToolTip("Mark a part of the video, from the playhead (or drag along the times above the clips)")
+        ms.clicked.connect(lambda: self._mark_at("a"))
+        tr.addWidget(ms)
+        me = button("Ends here", "tri_down", "ghost")
+        me.clicked.connect(lambda: self._mark_at("b"))
+        tr.addWidget(me)
+        self.mark_lbl = label("none marked", "faint")
+        tr.addWidget(self.mark_lbl)
+        self.mark_clear = button("", "x", "ghost")
+        self.mark_clear.setToolTip("Unmark")
+        self.mark_clear.setFixedWidth(30)
+        self.mark_clear.clicked.connect(lambda: self._set_mark(None))
+        tr.addWidget(self.mark_clear)
+        tr.addStretch(1)
         l.addLayout(tr)
         self.timeline = Timeline()
         self.timeline.seek.connect(self.seek)
         self.timeline.picked.connect(self._picked)
         self.timeline.rangeChanged.connect(self._range_dragged)
         self.timeline.committed.connect(lambda: self.changed())
+        self.timeline.marked.connect(self._set_mark)
         sc = QScrollArea()
         sc.setWidgetResizable(True)
         sc.setFrameShape(QFrame.NoFrame)
@@ -256,8 +282,8 @@ class EditorPage(QWidget):
         ol = QVBoxLayout(outer)
         ol.setContentsMargins(8, 8, 8, 8)
         ol.setSpacing(8)
-        self.tool_seg = Segmented(TOOLS[:3])
-        self.tool_seg2 = Segmented(TOOLS[3:])
+        self.tool_seg = Segmented(TOOLS[:4])
+        self.tool_seg2 = Segmented(TOOLS[4:])
         self.tool_seg.changed.connect(self.set_tool)
         self.tool_seg2.changed.connect(self.set_tool)
         ol.addWidget(self.tool_seg)
@@ -273,7 +299,7 @@ class EditorPage(QWidget):
         self.pages = {}
         for key, builder in (("clip", self._clip_tool), ("crop", self._crop_tool), ("blur", self._blur_tool),
                              ("overlay", self._overlay_tool), ("colour", self._colour_tool),
-                             ("export", self._export_tool)):
+                             ("sound", self._sound_tool), ("export", self._export_tool)):
             w = QWidget()
             w.setObjectName("transparent")
             lay = QVBoxLayout(w)
@@ -347,38 +373,70 @@ class EditorPage(QWidget):
         self.crop_on = QCheckBox("Crop")
         self.crop_on.toggled.connect(self._crop_toggled)
         l.addWidget(self.crop_on)
+        l.addWidget(label("Finished shape", "cap"))
         r = QHBoxLayout()
-        r.addWidget(label("Shape", "cap"))
         self.aspect = QComboBox()
         for k in ASPECTS:
-            self.aspect.addItem({"free": "Free", "source": "Same as the video"}.get(k, k), k)
+            if k != "free":
+                self.aspect.addItem({"source": "Same as the video"}.get(k, k), k)
+        self.aspect.setToolTip("The finished video's shape. It's as big as fits in the video; every crop is fitted "
+                               "into it, so zooming never changes its size.")
         self.aspect.activated.connect(self._aspect_changed)
         r.addWidget(self.aspect, 1)
         l.addLayout(r)
-        self.crop_moving = QCheckBox("Moving crop")
-        self.crop_moving.toggled.connect(self._crop_moving)
-        l.addWidget(self.crop_moving)
-        l.addWidget(label("Drag the box on the picture. With Moving crop on, moving it at another time adds a key "
-                          "there and it glides between keys; making it smaller zooms in.", "muted", wrap=True))
-        b = button("Follow a subject", "scan", "primary")
-        b.setToolTip("Put the box around it at the playhead first. The box follows it from here to the end.")
-        b.clicked.connect(lambda: self.track("crop", "crop"))
-        l.addWidget(b)
+        l.addWidget(label("Move or resize the box on the picture. Go to another moment and move it again: it stays "
+                          "where you put it until you move it again, and glides between the two. Smaller zooms in; "
+                          "bigger zooms out (it can go past the edges).", "muted", wrap=True))
         r = QHBoxLayout()
-        d = button("Remove key here", "minus", "ghost")
-        d.clicked.connect(lambda: self._delete_key("crop", "crop"))
-        r.addWidget(d)
-        c = button("Keep it still", "undo", "ghost")
-        c.setToolTip("Remove every key: the crop stays where it is now")
-        c.clicked.connect(lambda: self._clear_keys("crop", "crop"))
-        r.addWidget(c)
+        r.addWidget(label("Moves take", "cap"))
+        self.trans = _slider(0, 30, 5)            # tenths of a second
+        self.trans.valueChanged.connect(self._trans_moved)
+        self.trans.sliderReleased.connect(lambda: self.changed())
+        r.addWidget(self.trans, 1)
+        self.trans_lbl = label("0.5 s", "mono")
+        self.trans_lbl.setFixedWidth(44)
+        r.addWidget(self.trans_lbl)
+        l.addLayout(r)
+        self.keep_shape = QCheckBox("Keep the box the finished shape")
+        self.keep_shape.setToolTip("Off: the box can be any shape; it's fitted in without stretching and the rest "
+                                   "is filled")
+        self.keep_shape.toggled.connect(lambda v: self._crop_set(keep_shape=v))
+        l.addWidget(self.keep_shape)
+        l.addWidget(label("Fill the rest of the frame with", "cap"))
+        r = QHBoxLayout()
+        self.fill = Segmented([("blur", "Blurred picture"), ("colour", "Colour")])
+        self.fill.changed.connect(lambda v: self._crop_set(fill=v))
+        r.addWidget(self.fill)
+        self.fill_col = button("", None)
+        self.fill_col.setFixedSize(30, 26)
+        self.fill_col.setToolTip("The fill colour")
+        self.fill_col.clicked.connect(self._pick_fill_colour)
+        r.addWidget(self.fill_col)
         r.addStretch(1)
         l.addLayout(r)
+        b = button("Follow a subject", "scan", "primary")
+        b.setToolTip("Put the box around it at the playhead first. It follows it to the end of the marked part, or "
+                     "to the end of the video.")
+        b.clicked.connect(lambda: self.track("crop", "crop"))
+        l.addWidget(b)
+        self.crop_section = button("Keep this box for the marked part", "check")
+        self.crop_section.setToolTip("Fix a stretch the following got wrong: put the box right at the playhead, mark "
+                                     "the part, then use this. Before and after stay as they were.")
+        self.crop_section.clicked.connect(lambda: self._keep_for_part("crop", "crop"))
+        l.addWidget(self.crop_section)
+        d = button("Remove the move here", "minus", "ghost")
+        d.clicked.connect(lambda: self._delete_key("crop", "crop"))
+        l.addWidget(d, 0, Qt.AlignLeft)
+        c = button("Use this box for the whole video", "refresh", "ghost")
+        c.setToolTip("Remove every move: the box stays as it is now, all the way through")
+        c.clicked.connect(lambda: self._clear_keys("crop", "crop"))
+        l.addWidget(c, 0, Qt.AlignLeft)
         self.crop_info = label("", "faint", wrap=True)
         l.addWidget(self.crop_info)
 
     def _blur_tool(self, l: QVBoxLayout) -> None:
-        l.addWidget(label("Draw a box on the picture to blur that part. Pick one to change it.", "muted", wrap=True))
+        l.addWidget(label("Draw a box on the picture to blur that part; drag it or its corners to change it.", "muted",
+                          wrap=True))
         r = QHBoxLayout()
         ab = button("Add a box", "plus")
         ab.clicked.connect(lambda: self._blur_drawn((0.4, 0.4, 0.2, 0.2)))
@@ -393,6 +451,11 @@ class EditorPage(QWidget):
         bl = QVBoxLayout(self.blur_box)
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(8)
+        self.blur_space = Segmented([("output", "On the frame"), ("video", "On the picture")])
+        self.blur_space.setToolTip("On the frame: stays in the same spot of the finished video, even when the crop "
+                                   "moves. With the picture: sticks to what's filmed (following a subject uses this).")
+        self.blur_space.changed.connect(self._blur_space)
+        bl.addWidget(self.blur_space)
         self.blur_kind = Segmented([("blur", "Blur"), ("pixelate", "Pixelate")])
         self.blur_kind.changed.connect(lambda v: self._blur_set(kind=v))
         bl.addWidget(self.blur_kind)
@@ -407,14 +470,19 @@ class EditorPage(QWidget):
         r.addWidget(self.blur_strength, 1)
         bl.addLayout(r)
         bl.addLayout(self._when_row("blur"))
-        self.blur_moving = QCheckBox("Moving (follows its keys)")
+        self.blur_moving = QCheckBox("Moves at different moments")
+        self.blur_moving.setToolTip("Off: dragging it just moves it, for its whole time. On: like the crop, it stays "
+                                    "where you put it at each moment and glides between.")
         self.blur_moving.toggled.connect(lambda v: self._blur_set(moving=v))
         bl.addWidget(self.blur_moving)
         tb = button("Follow a subject", "scan", "primary")
         tb.setToolTip("Put the box on it at the playhead; the box follows it until the box's end time")
         tb.clicked.connect(lambda: self.sel and self.track("blur", self.sel[1]))
         bl.addWidget(tb)
-        dk = button("Remove key here", "minus", "ghost")
+        ks = button("Keep this box for the marked part", "check")
+        ks.clicked.connect(lambda: self.sel and self._keep_for_part("blur", self.sel[1]))
+        bl.addWidget(ks)
+        dk = button("Remove the move here", "minus", "ghost")
         dk.clicked.connect(lambda: self.sel and self._delete_key("blur", self.sel[1]))
         bl.addWidget(dk, 0, Qt.AlignLeft)
         l.addWidget(self.blur_box)
@@ -490,6 +558,63 @@ class EditorPage(QWidget):
         rb.clicked.connect(self._colour_reset)
         l.addWidget(rb)
         l.addWidget(label("Colour changes show on the picture straight away.", "faint", wrap=True))
+
+    def _sound_tool(self, l: QVBoxLayout) -> None:
+        self.norm = QCheckBox("Even out the loudness")
+        self.norm.setToolTip("Brings the whole edit to the same loudness as your song library (Settings > Song "
+                             "volume), without letting it distort")
+        self.norm.toggled.connect(self._norm_toggled)
+        l.addWidget(self.norm)
+        self.norm_lbl = label("", "faint", wrap=True)
+        l.addWidget(self.norm_lbl)
+        r = QHBoxLayout()
+        lb = label("Volume", "cap")
+        lb.setFixedWidth(80)
+        r.addWidget(lb)
+        self.vol = _slider(-40, 40, 0)          # half dB
+        self.vol.valueChanged.connect(self._vol_moved)
+        self.vol.sliderReleased.connect(lambda: self.changed())
+        r.addWidget(self.vol, 1)
+        self.vol_lbl = label("0 dB", "mono")
+        self.vol_lbl.setFixedWidth(60)
+        r.addWidget(self.vol_lbl)
+        l.addLayout(r)
+        l.addWidget(label("Louder or quieter parts", "h2"))
+        l.addWidget(label("Mark a part (drag along the times above the clips, or Starts here / Ends here under the "
+                          "picture), then:", "muted", wrap=True))
+        r = QHBoxLayout()
+        lo = button("Make it louder", "plus")
+        lo.clicked.connect(lambda: self._add_section(6.0))
+        r.addWidget(lo)
+        qu = button("Make it quieter", "minus")
+        qu.clicked.connect(lambda: self._add_section(-6.0))
+        r.addWidget(qu)
+        r.addStretch(1)
+        l.addLayout(r)
+        self.sec_box = QWidget()
+        self.sec_box.setObjectName("transparent")
+        sl = QVBoxLayout(self.sec_box)
+        sl.setContentsMargins(0, 0, 0, 0)
+        self.sec_when = label("", "faint")
+        sl.addWidget(self.sec_when)
+        r = QHBoxLayout()
+        lb = label("This part", "cap")
+        lb.setFixedWidth(80)
+        r.addWidget(lb)
+        self.sec_gain = _slider(-40, 40, 12)
+        self.sec_gain.valueChanged.connect(self._sec_moved)
+        self.sec_gain.sliderReleased.connect(lambda: self.changed())
+        r.addWidget(self.sec_gain, 1)
+        self.sec_lbl = label("", "mono")
+        self.sec_lbl.setFixedWidth(60)
+        r.addWidget(self.sec_lbl)
+        sl.addLayout(r)
+        rm = button("Remove this part", "trash", "dangerGhost")
+        rm.clicked.connect(self.delete_selected)
+        sl.addWidget(rm, 0, Qt.AlignLeft)
+        l.addWidget(self.sec_box)
+        l.addWidget(label("Parts show on the Sound line of the timeline: click one to change it, drag its ends to "
+                          "move them. The sound fades smoothly in and out of them.", "faint", wrap=True))
 
     def _export_tool(self, l: QVBoxLayout) -> None:
         l.addWidget(label("File name", "cap"))
@@ -670,6 +795,8 @@ class EditorPage(QWidget):
         self._committed = js
         if frames:
             self._frame_cache.clear()
+        if self.p.sound.normalize:
+            self._measure_sound()          # trims or clips changed: the sound is measured again
         self._save_timer.start()
         self._sync_all(keep_panels=True)
         if frames:
@@ -715,7 +842,7 @@ class EditorPage(QWidget):
         p = self.p
         has = p is not None and bool(p.clips)
         self.stack.setCurrentIndex(1 if has else 0)
-        for w in (self.add_btn, self.export_btn, self.undo_btn, self.redo_btn):
+        for w in (self.add_btn, self.export_btn, self.undo_btn, self.redo_btn, self.reset_btn):
             w.setEnabled(has)
         self.undo_btn.setEnabled(has and bool(self.undo_stack))
         self.redo_btn.setEnabled(has and bool(self.redo_stack))
@@ -791,14 +918,24 @@ class EditorPage(QWidget):
             self.trim.set_range(c.start, c.out)
         # crop
         cr = p.crop
-        for w, v in ((self.crop_on, cr.enabled), (self.crop_moving, cr.moving)):
+        for w, v in ((self.crop_on, cr.enabled), (self.keep_shape, cr.keep_shape)):
             w.blockSignals(True)
             w.setChecked(v)
             w.blockSignals(False)
-        self.aspect.setCurrentIndex(max(0, self.aspect.findData(cr.aspect)))
+        self.aspect.setCurrentIndex(max(0, self.aspect.findData(cr.aspect if cr.aspect != "free" else "source")))
+        self.trans.blockSignals(True)
+        self.trans.setValue(int(round(cr.transition * 10)))
+        self.trans.blockSignals(False)
+        self.trans_lbl.setText(f"{cr.transition:.1f} s" if cr.transition else "a cut")
+        self.fill.set_value(cr.fill)
+        self.fill_col.setStyleSheet(f"QPushButton {{ background: {cr.fill_colour}; border: 1px solid {C['line2']}; }}")
+        self.fill_col.setEnabled(cr.fill == "colour")
+        self.crop_section.setEnabled(self.mark is not None and cr.enabled)
         OW, OH = p.output_size()
-        nk = len(cr.keys)
-        self.crop_info.setText((f"Output {OW}×{OH}" + (f" · {nk} keys" if cr.moving and nk > 1 else "")) if cr.enabled
+        moves = sum(1 for k in cr.keys[1:] if not (len(k) > 5 and k[5] == "l"))
+        tracked = sum(1 for k in cr.keys if len(k) > 5 and k[5] == "l")
+        self.crop_info.setText((f"Finished size {OW}×{OH}" + (f" · {moves} move{'s' if moves != 1 else ''}" if moves else "")
+                                + (" · follows a subject" if tracked else "")) if cr.enabled
                                else "Off: the whole picture is used.")
         # blur
         b = self._sel_blur()
@@ -810,8 +947,9 @@ class EditorPage(QWidget):
             self.blur_strength.blockSignals(True)
             self.blur_strength.setValue(b.strength)
             self.blur_strength.blockSignals(False)
+            self.blur_space.set_value(b.space)
             self.blur_moving.blockSignals(True)
-            self.blur_moving.setChecked(b.moving)
+            self.blur_moving.setChecked(b.moving or len(b.keys) > 1)
             self.blur_moving.blockSignals(False)
             self.blur_when.setText(f"On from {fmt_precise(b.start)} to {fmt_precise(p.blur_end(b))}")
         # overlay
@@ -831,6 +969,24 @@ class EditorPage(QWidget):
             s.setValue(int(round(v * scale)))
             s.blockSignals(False)
             val.setText(f"{v:.2f}")
+        # sound
+        snd = p.sound
+        self.norm.blockSignals(True)
+        self.norm.setChecked(snd.normalize)
+        self.norm.blockSignals(False)
+        self.norm_lbl.setText(self._norm_text())
+        self.vol.blockSignals(True)
+        self.vol.setValue(int(round(snd.gain_db * 2)))
+        self.vol.blockSignals(False)
+        self.vol_lbl.setText(f"{snd.gain_db:+.1f} dB" if snd.gain_db else "0 dB")
+        sec = self._sel_section()
+        self.sec_box.setVisible(sec is not None)
+        if sec is not None:
+            self.sec_gain.blockSignals(True)
+            self.sec_gain.setValue(int(round(sec["gain_db"] * 2)))
+            self.sec_gain.blockSignals(False)
+            self.sec_lbl.setText(f"{sec['gain_db']:+.1f} dB")
+            self.sec_when.setText(f"From {fmt_precise(sec['start'])} to {fmt_precise(sec['end'])}")
         # export
         self.out_name.setText(p.output.name or p.default_output_path().name)
         self.out_where.setText(f"Saved next to {Path(p.clips[0].path).name}, in {Path(p.clips[0].path).parent}. "
@@ -911,8 +1067,7 @@ class EditorPage(QWidget):
 
     def _play_end(self) -> None:
         self._playing_ui(False)
-        self.canvas.result = self.result_box.isChecked()
-        self.canvas.recompose()
+        self._update_view()
 
     def key_play_pause(self) -> None:
         if self.p is None:
@@ -921,7 +1076,7 @@ class EditorPage(QWidget):
             self.stop()
             self._grab_timer.start()
         else:
-            self.canvas.result = True
+            self.canvas.set_view("result")
             self.preview.start(self.p, self.t, self.preview_size())
             self._playing_ui(True)
 
@@ -932,7 +1087,7 @@ class EditorPage(QWidget):
         if self.preview.playing:
             self.preview.stop()
             self._playing_ui(False)
-            self.canvas.result = self.result_box.isChecked()
+            self._update_view()
 
     def _step(self, frames: int) -> None:
         if self.p is None:
@@ -965,9 +1120,17 @@ class EditorPage(QWidget):
     def key_mute(self) -> None:
         self.audio.set_volume(0 if self.audio._volume else 80)
 
-    def _result_toggled(self, on: bool) -> None:
-        self.canvas.result = on or self.preview.playing
-        self.canvas.recompose()
+    def _update_view(self) -> None:
+        """Cropping shows the whole picture (to move the box); everything else shows the finished frame, unless
+        Whole picture is ticked. Playing always shows the finished frame."""
+        if self.preview.playing:
+            view = "result"
+        elif self.tool == "crop" or self.whole_box.isChecked():
+            view = "whole"
+        else:
+            view = "result"
+        self.whole_box.setEnabled(self.tool != "crop")
+        self.canvas.set_view(view)
 
     # =========================================================================================================
     # tools
@@ -976,7 +1139,9 @@ class EditorPage(QWidget):
         self.tool_seg.set_value(tool) if tool in dict(TOOLS[:3]) else self.tool_seg.set_value(None)
         self.tool_seg2.set_value(tool) if tool in dict(TOOLS[3:]) else self.tool_seg2.set_value(None)
         self.tools.setCurrentWidget(self.pages[tool])
+        self.tool = tool
         self.canvas.tool = tool
+        self._update_view()
         if tool == "crop" and self.p is not None and not self.p.crop.enabled:
             self.crop_on.setChecked(True)
         if tool == "overlay":
@@ -988,19 +1153,13 @@ class EditorPage(QWidget):
         self.canvas.update()
 
     def _picked(self, kind: str, iid: str) -> None:
+        # Picking something only selects it: the tool you're in stays until you choose another tab.
         if kind == "clip":
             self.clip_list.setCurrentRow(int(iid))
-            self.set_tool("clip")
             return
         self.sel = (kind, iid) if kind else None
         self.canvas.selected = self.sel
         self.timeline.selected = self.sel
-        if kind == "blur":
-            self.set_tool("blur")
-        elif kind == "overlay":
-            self.set_tool("overlay")
-        elif kind == "crop":
-            self.set_tool("crop")
         self._sync_tool_pages()
         self.canvas.update()
         self.timeline.update()
@@ -1016,33 +1175,49 @@ class EditorPage(QWidget):
         return next((o for o in self.p.overlays if o.id == self.sel[1]), None)
 
     # ---- boxes on the picture --------------------------------------------------------------------------------
-    def _box_dragged(self, kind: str, iid: str, box) -> None:
+    def _native(self, box, frm: str, to: str):
+        if frm == to:
+            return box
+        return self.p.canvas_to_output(box, self.t) if to == "output" else self.p.output_to_canvas(box, self.t)
+
+    def _box_dragged(self, kind: str, iid: str, box, space: str) -> None:
         p = self.p
         if kind == "crop":
-            set_key(p.crop.keys, self.t, box, p.crop.moving)
+            set_key(p.crop.keys, self.t, box)
         elif kind == "blur":
             b = next((x for x in p.blurs if x.id == iid), None)
             if b is not None:
-                set_key(b.keys, self.t, box, b.moving)
+                nb = self._native(box, space, b.space)
+                if b.moving or len(b.keys) > 1:
+                    set_key(b.keys, self.t, nb)
+                else:                          # a still box: it just moves
+                    b.keys[0][1:5] = list(nb)
         elif kind == "overlay":
             o = next((x for x in p.overlays if x.id == iid), None)
             if o is not None:
-                x, y, w, _h = box
-                crop = p.crop_box(self.t)
-                if crop is not None:                    # back from the canvas to the output frame
-                    cx, cy, cw, ch = crop
-                    x, y, w = (x - cx) / cw, (y - cy) / ch, w / cw
+                x, y, w, _h = self._native(box, space, "output")
                 o.x, o.y, o.w = x, y, max(0.01, w)
         self._live()
         self.canvas.update()
 
-    def _blur_drawn(self, box) -> None:
+    def _blur_drawn(self, box, space: str = "output") -> None:
         if self.p is None:
             return
         before = self.p.to_json()
-        b = Blur(start=0.0, end=0.0, keys=[[0.0] + list(box)])
+        b = Blur(start=0.0, end=0.0, space=space, keys=[[0.0] + list(box) + ["h"]])
         self.p.blurs.append(b)
         self.sel = ("blur", b.id)
+        self.changed(before=before)
+
+    def _blur_space(self, space: str) -> None:
+        """Change where a blur box lives, keeping it where it is on screen at each of its keys."""
+        b = self._sel_blur()
+        if b is None or b.space == space:
+            return
+        before = self.p.to_json()
+        conv = self.p.canvas_to_output if space == "output" else self.p.output_to_canvas
+        b.keys = [[k[0]] + list(conv(k[1:5], k[0])) + ([k[5]] if len(k) > 5 else []) for k in b.keys]
+        b.space = space
         self.changed(before=before)
 
     def _crop_toggled(self, on: bool) -> None:
@@ -1050,8 +1225,6 @@ class EditorPage(QWidget):
             return
         before = self.p.to_json()
         self.p.crop.enabled = on
-        if on and self.p.crop.aspect not in ("free",) and self.p.aspect_value():
-            self._fit_crop_aspect()
         self.changed(before=before)
 
     def _aspect_changed(self) -> None:
@@ -1061,47 +1234,77 @@ class EditorPage(QWidget):
         self.changed(before=before)
 
     def _fit_crop_aspect(self) -> None:
-        """Reshape every crop key to the chosen shape, keeping each one's centre."""
+        """Reshape every crop box to the new finished shape, keeping its centre; the first one fills the video."""
         p = self.p
         a = p.aspect_value()
-        if not a:
-            return
         W, H, _ = p.canvas()
-        for k in p.crop.keys:
-            _t, x, y, w, h = k
+        for n, k in enumerate(p.crop.keys):
+            _t, x, y, w, h = k[:5]
             cx, cy = x + w / 2, y + h / 2
-            area = w * h
-            nw = (area * a * H / W) ** 0.5
-            nh = nw * W / H / a
-            if nw > 1:
-                nw, nh = 1.0, 1.0 * W / H / a
-            if nh > 1:
-                nh, nw = 1.0, a * H / W
-            k[1:5] = [min(1 - nw, max(0, cx - nw / 2)), min(1 - nh, max(0, cy - nh / 2)), nw, nh]
+            hh = h if n else 1.0
+            nw = hh * H * a / W
+            if n == 0 and nw > 1:
+                nw, hh = 1.0, W / a / H
+            k[1:5] = [cx - nw / 2 if n else (1 - nw) / 2, cy - hh / 2 if n else (1 - hh) / 2, nw, hh]
 
-    def _crop_moving(self, on: bool) -> None:
+    def _crop_set(self, **kw) -> None:
+        if self.p is None:
+            return
         before = self.p.to_json()
-        self.p.crop.moving = on
-        if not on:
-            self.p.crop.keys = [[0.0] + list(interp(self.p.crop.keys, self.t))]
+        for k, v in kw.items():
+            setattr(self.p.crop, k, v)
         self.changed(before=before)
+
+    def _trans_moved(self, v: int) -> None:
+        self.p.crop.transition = v / 10
+        self.trans_lbl.setText(f"{v / 10:.1f} s" if v else "a cut")
+        self._live()
+
+    def _pick_fill_colour(self) -> None:
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QColorDialog
+        c = QColorDialog.getColor(QColor(self.p.crop.fill_colour), self, "Fill colour")
+        if c.isValid():
+            self._crop_set(fill_colour=c.name())
 
     def _delete_key(self, kind: str, iid: str) -> None:
         keys = self.p.crop.keys if kind == "crop" else next((b.keys for b in self.p.blurs if b.id == iid), None)
         if not keys or len(keys) < 2:
             hub.toast.emit("There's only one key: nothing to remove.", "info")
             return
-        before = self.p.to_json()
         k = min(keys, key=lambda k: abs(k[0] - self.t))
+        if k is keys[0]:
+            hub.toast.emit("That's the starting box: move it instead.", "info")
+            return
+        before = self.p.to_json()
         keys.remove(k)
         self.changed(before=before)
 
     def _clear_keys(self, kind: str, iid: str) -> None:
         before = self.p.to_json()
         if kind == "crop":
-            self.p.crop.keys = [[0.0] + list(interp(self.p.crop.keys, self.t))]
-            self.p.crop.moving = False
+            self.p.crop.keys = [[0.0] + list(self.p.crop_box(self.t)) + ["h"]]
         self.changed(before=before)
+
+    def _keep_for_part(self, kind: str, iid: str) -> None:
+        """Keep the box as it is at the playhead for the whole marked part (fixing a stretch tracking got wrong)."""
+        if self.mark is None:
+            hub.toast.emit("Mark the part first: drag along the times above the clips, or use Starts here and "
+                           "Ends here.", "info")
+            return
+        a, b = self.mark
+        p = self.p
+        if kind == "crop":
+            keys, box = p.crop.keys, p.crop_box(self.t)
+        else:
+            bl = next((x for x in p.blurs if x.id == iid), None)
+            if bl is None:
+                return
+            keys, box = bl.keys, interp(bl.keys, self.t, p.crop.transition)
+        before = p.to_json()
+        apply_section(keys, a, b, box, p.crop.transition, p.duration)
+        self.changed(before=before)
+        hub.toast.emit(f"The box stays put from {fmt_precise(a)} to {fmt_precise(b)}.", "ok")
 
     def track(self, kind: str, iid: str) -> None:
         """Follow the subject inside the box at the playhead, as a job in the queue."""
@@ -1118,7 +1321,15 @@ class EditorPage(QWidget):
             b = next((x for x in p.blurs if x.id == iid), None)
             if b is None:
                 return
+            if b.space == "output":           # following works on the picture itself
+                self._picked("blur", iid)
+                self._blur_space("video")
+                p = self.p
+                b = next(x for x in p.blurs if x.id == iid)
             keys, t1 = b.keys, p.blur_end(b)
+            b.moving = True
+        if self.mark is not None and self.mark[0] - 0.05 <= self.t < self.mark[1]:
+            t1 = min(t1, self.mark[1])        # only the marked part (to redo a stretch it got wrong)
         if t1 - self.t < 0.2:
             hub.toast.emit("Move the playhead back: there's nothing left to follow after it.", "info")
             return
@@ -1126,25 +1337,25 @@ class EditorPage(QWidget):
         snap = p.copy()
         t0 = self.t
         start_keys = [list(k) for k in keys]
-        if not (p.crop.moving if kind == "crop" else b.moving):
-            start_keys = [[t0] + list(interp(keys, t0))]
 
         def done(res):
             if self.p is None:
                 return
             before = self.p.to_json()
             if kind == "crop":
-                self.p.crop.keys, self.p.crop.moving = res["keys"], True
+                self.p.crop.keys = res["keys"]
             else:
                 bb = next((x for x in self.p.blurs if x.id == iid), None)
                 if bb is None:
                     return
-                bb.keys, bb.moving = res["keys"], True
+                bb.keys = res["keys"]
             self.changed(before=before)
             msg = f"Followed it for {fmt_time(res['until'] - t0)} ({res['frames']} frames, {res['tracker']})."
             if res["lost"] is not None:
                 msg += f" It lost the subject at {fmt_precise(res['lost'])}: put the box back on it there and " \
                        "follow again."
+            else:
+                msg += " Where it's wrong: move the box there, mark the part, Keep this box for the marked part."
             hub.toast.emit(msg, "warn" if res["lost"] is not None else "ok")
 
         self.queue.add("Following a subject", track, snap, start_keys, t0, t1, pausable=True, on_done=done,
@@ -1159,8 +1370,8 @@ class EditorPage(QWidget):
         before = self.p.to_json()
         for k, v in kw.items():
             setattr(b, k, v)
-        if "moving" in kw and not kw["moving"]:
-            b.keys = [[0.0] + list(interp(b.keys, self.t))]
+        if kw.get("moving") is False and len(b.keys) > 1:      # still again: where it is now, all the time
+            b.keys = [[0.0] + list(interp(b.keys, self.t, self.p.crop.transition)) + ["h"]]
         if commit:
             self.changed(before=before)
         else:
@@ -1181,6 +1392,12 @@ class EditorPage(QWidget):
         self.changed(before=before)
 
     def _range_dragged(self, kind: str, iid: str, a: float, b: float) -> None:
+        if kind == "sound":
+            sec = next((x for x in self.p.sound.sections if x.get("id") == iid), None)
+            if sec is not None:
+                sec["start"], sec["end"] = a, b
+                self._live()
+            return
         it = next((x for x in (self.p.blurs if kind == "blur" else self.p.overlays) if x.id == iid), None)
         if it is None:
             return
@@ -1223,6 +1440,8 @@ class EditorPage(QWidget):
             self.p.blurs = [b for b in self.p.blurs if b.id != iid]
         elif kind == "overlay":
             self.p.overlays = [o for o in self.p.overlays if o.id != iid]
+        elif kind == "sound":
+            self.p.sound.sections = [x for x in self.p.sound.sections if x.get("id") != iid]
         else:
             return
         self.sel = None
@@ -1448,6 +1667,116 @@ class EditorPage(QWidget):
         self.p = None
         self.key = None
         self._sync_all()
+
+    # ---- marking a part -----------------------------------------------------------------------------------------
+    def _set_mark(self, mark) -> None:
+        self.mark = tuple(mark) if mark else None
+        self.timeline.mark = self.mark
+        self.timeline.update()
+        self.mark_lbl.setText(f"{fmt_precise(self.mark[0])} – {fmt_precise(self.mark[1])}" if self.mark
+                              else "none marked")
+        self.mark_clear.setEnabled(self.mark is not None)
+        if self.p is not None:
+            self.crop_section.setEnabled(self.mark is not None and self.p.crop.enabled)
+
+    def _mark_at(self, which: str) -> None:
+        if self.p is None:
+            return
+        a, b = self.mark if self.mark else (0.0, self.p.duration)
+        if which == "a":
+            a = self.t
+            b = b if b > a + 0.05 else self.p.duration
+        else:
+            b = self.t
+            a = a if a < b - 0.05 else 0.0
+        self._set_mark((a, b))
+
+    # ---- sound --------------------------------------------------------------------------------------------------
+    def _sel_section(self):
+        if self.p is None or not self.sel or self.sel[0] != "sound":
+            return None
+        return next((x for x in self.p.sound.sections if x.get("id") == self.sel[1]), None)
+
+    def _norm_text(self) -> str:
+        snd = self.p.sound
+        if not snd.normalize:
+            return "Off: the sound stays as loud as it is."
+        if len(snd.measured) >= 3 and snd.measured[0] == self.p.sound_signature():
+            if snd.measured[1] is None:
+                return "There's no sound to even out."
+            g = R.norm_gain(self.p)
+            return f"Measured {snd.measured[1]:.1f} LUFS: {g:+.1f} dB to match your songs."
+        return "Measuring the sound…"
+
+    def _norm_toggled(self, on: bool) -> None:
+        before = self.p.to_json()
+        self.p.sound.normalize = on
+        self.changed(before=before)
+        if on:
+            self._measure_sound()
+
+    def _measure_sound(self) -> None:
+        p = self.p
+        if p is None or not p.sound.normalize:
+            return
+        sig = p.sound_signature()
+        if len(p.sound.measured) >= 3 and p.sound.measured[0] == sig:
+            return
+        snap = p.copy()
+
+        def done(l, sig=sig):
+            if self.p is None or self.p.sound_signature() != sig:
+                return
+            self.p.sound.measured = [sig, l.lufs if l else None, l.peak if l else None]
+            self._committed = self.p.to_json()      # a measurement, not an edit: nothing to undo
+            self._save_timer.start()
+            self.norm_lbl.setText(self._norm_text())
+
+        workers.run_bg(R.measure_sound, snap, done=done,
+                       failed=lambda m: self.norm_lbl.setText(f"Couldn't measure the sound: {m}"))
+
+    def _vol_moved(self, v: int) -> None:
+        self.p.sound.gain_db = v / 2
+        self.vol_lbl.setText(f"{v / 2:+.1f} dB" if v else "0 dB")
+
+    def _add_section(self, gain: float) -> None:
+        if self.p is None:
+            return
+        if self.mark is None:
+            hub.toast.emit("Mark the part first: drag along the times above the clips, or use Starts here and "
+                           "Ends here.", "info")
+            return
+        before = self.p.to_json()
+        sec = Section(start=self.mark[0], end=self.mark[1], gain_db=gain)
+        self.p.sound.sections.append(dict(sec.__dict__))
+        self.sel = ("sound", sec.id)
+        self.changed(before=before)
+
+    def _sec_moved(self, v: int) -> None:
+        sec = self._sel_section()
+        if sec is not None:
+            sec["gain_db"] = v / 2
+            self.sec_lbl.setText(f"{v / 2:+.1f} dB")
+            self.timeline.update()
+
+    # ---- starting over --------------------------------------------------------------------------------------------
+    def start_over(self) -> None:
+        if self.p is None:
+            return
+        first = self.p.clips[0].path
+        if not dialogs.ask(self, "Start over?", f"Every edit of {Path(first).name} is thrown away: trims, other videos "
+                           "joined to it, crop, blur, overlays, colour and sound. Ctrl+Z brings it back while the "
+                           "editor stays open.", "Start over", danger=True):
+            return
+        before = self.p.to_json()
+        try:
+            self.p = Project(clips=[clip_from_file(first)])
+        except Exception as e:  # noqa: BLE001
+            hub.toast.emit(f"Couldn't read {Path(first).name}: {e}", "error")
+            return
+        self.sel = None
+        self._set_mark(None)
+        self.changed(before=before, frames=True)
 
     # ---- colour / output -------------------------------------------------------------------------------------
     def _colour_moved(self, key: str, v: float) -> None:
