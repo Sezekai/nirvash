@@ -6,7 +6,6 @@ drew; only its position follows. Positions are smoothed so the box doesn't shake
 the item's time, or when the tracker loses the subject for half a second (it says so)."""
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +14,7 @@ from ..core import log as _log
 from ..core.paths import asset
 from ..media import ff
 from .project import Project, interp
-from .render import decode_cmd
+from .render import FrameSource
 
 log = _log.get("track")
 
@@ -63,58 +62,31 @@ def track(ctx, p: Project, keys: list, t0: float, t1: float, smooth: float = 0.2
     out_t, out_xy = [], []
     lost_run, lost_at = 0, None
     total = max(1, int((t1 - t0) * fps))
-    t = t0
     started = False
-    i, src_t = p.clip_at(t0)
     done = 0
-    while i < len(p.clips) and t < t1 - 1e-6:
-        clip = p.clips[i]
-        off = p.clip_offset(i)
-        dur = min(clip.out - src_t, t1 - t)
-        proc = ff.popen(decode_cmd(p, i, src_t, aw, ah, fps, duration=dur), stdin=subprocess.DEVNULL,
-                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        try:
-            k = 0
-            while True:
-                ctx.check()
-                buf = proc.stdout.read(n)
-                if len(buf) < n:
+    for ft, frame in FrameSource(p, t0, aw, ah, fps, end=t1):
+        ctx.check()
+        if not started:
+            tracker.init(frame, (int(bx * aw), int(by * ah), max(4, int(bw * aw)), max(4, int(bh * ah))))
+            started = True
+            cx, cy = bx + bw / 2, by + bh / 2
+        else:
+            ok, r = tracker.update(frame)
+            score = tracker.getTrackingScore() if hasattr(tracker, "getTrackingScore") else (1.0 if ok else 0.0)
+            if not ok or score < 0.3:
+                lost_run += 1
+                if lost_run >= max(3, int(fps * 0.5)):
+                    lost_at = ft
                     break
-                frame = np.frombuffer(buf, np.uint8).reshape(ah, aw, 3)
-                ft = off + (src_t - clip.start) + k / fps
-                k += 1
-                if ft > t1:
-                    break
-                if not started:
-                    tracker.init(frame, (int(bx * aw), int(by * ah), max(4, int(bw * aw)), max(4, int(bh * ah))))
-                    started = True
-                    cx, cy = bx + bw / 2, by + bh / 2
-                else:
-                    ok, r = tracker.update(frame)
-                    score = tracker.getTrackingScore() if hasattr(tracker, "getTrackingScore") else (1.0 if ok else 0.0)
-                    if not ok or score < 0.3:
-                        lost_run += 1
-                        if lost_run >= max(3, int(fps * 0.5)):
-                            lost_at = ft
-                            break
-                        continue
-                    lost_run = 0
-                    cx = (r[0] + r[2] / 2) / aw
-                    cy = (r[1] + r[3] / 2) / ah
-                out_t.append(ft)
-                out_xy.append((cx, cy))
-                done += 1
-                if done % 5 == 0:
-                    ctx.progress(min(0.99, done / total), f"Following it · frame {done} of {total}")
-        finally:
-            proc.kill()
-            proc.wait()
-        if lost_at is not None:
-            break
-        i += 1
-        if i < len(p.clips):
-            src_t = p.clips[i].start
-            t = p.clip_offset(i)
+                continue
+            lost_run = 0
+            cx = (r[0] + r[2] / 2) / aw
+            cy = (r[1] + r[3] / 2) / ah
+        out_t.append(ft)
+        out_xy.append((cx, cy))
+        done += 1
+        if done % 5 == 0:
+            ctx.progress(min(0.99, done / total), f"Following it · frame {done} of {total}")
     if not out_t:
         raise ValueError("couldn't read the video there")
     xy = np.array(out_xy, np.float64)

@@ -5,6 +5,7 @@ Edits are saved as you go and come back when the same video is opened again. Not
 files: exports go next to the first video as "<name>_edited.mp4" and never overwrite anything."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer
@@ -17,7 +18,8 @@ from ..core import log as _log
 from ..core.db import get_db
 from ..edit import overlays as ovl
 from ..edit import render as R
-from ..edit.project import ASPECTS, Blur, Overlay, Project, Section, apply_section, clip_from_file, interp, set_key
+from ..edit.project import (ASPECTS, LOCKS, Blur, Layer, Overlay, Project, Section, apply_section, clip_from_file,
+                            interp, set_key)
 from . import dialogs, theme, workers
 from .audio_editor import RangeWave, fmt_precise, parse_time
 from .editor_canvas import FrameCanvas, PreviewPlayer, Timeline
@@ -57,6 +59,7 @@ class EditorPage(QWidget):
         self._last_saved = ""
         self.sel: tuple[str, str] | None = None
         self.mark: tuple[float, float] | None = None    # a marked part of the timeline
+        self._drag_keys = None                          # keys as they were when a drag in a marked part began
         self.tool = "clip"
         self.queue = get_queue()
 
@@ -117,7 +120,8 @@ class EditorPage(QWidget):
         self._grab_timer = QTimer(self, singleShot=True, interval=40, timeout=self._grab)
         self._ops_timer = QTimer(self, singleShot=True, interval=30, timeout=self._ops_changed)
         from PySide6.QtGui import QKeySequence, QShortcut
-        for seq, fn in (("I", self.key_in), ("O", self.key_out), ("Delete", self.key_delete), ("Ctrl+Y", self.redo),
+        for seq, fn in (("I", self.key_in), ("O", self.key_out), ("X", self.split_here), ("Delete", self.key_delete),
+                        ("Ctrl+Y", self.redo),
                         ("Ctrl+Shift+Z", self.redo), ("E", lambda: self.set_tool("export"))):
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
@@ -219,7 +223,7 @@ class EditorPage(QWidget):
         self.canvas = FrameCanvas()
         self.canvas.setObjectName("stage")
         self.canvas.boxChanged.connect(self._box_dragged)
-        self.canvas.boxCommitted.connect(lambda: self.changed())
+        self.canvas.boxCommitted.connect(self._drag_done)
         self.canvas.boxPicked.connect(self._picked)
         self.canvas.boxDrawn.connect(self._blur_drawn)
         l.addWidget(self.canvas, 1)
@@ -363,6 +367,46 @@ class EditorPage(QWidget):
         self.mute = QCheckBox("Mute this clip's sound")
         self.mute.toggled.connect(lambda v: self._clip_set(mute=v))
         l.addWidget(self.mute)
+        l.addWidget(label("Keep parts, cut parts", "h2"))
+        l.addWidget(label("Mark a part (drag along the times above the timeline, or Starts here / Ends here), then "
+                          "cut it out, or keep only it. Do it again for more parts: the rest join up.", "muted",
+                          wrap=True))
+        r = QHBoxLayout()
+        co = button("Cut it out", "cut")
+        co.clicked.connect(self.cut_marked)
+        r.addWidget(co)
+        ko = button("Keep only it", "check")
+        ko.clicked.connect(self.keep_marked)
+        r.addWidget(ko)
+        r.addStretch(1)
+        l.addLayout(r)
+        sp = button("Split at the playhead", "minus", "ghost")
+        sp.setToolTip("Cut the clip in two here (X); then each piece can be trimmed, moved or removed")
+        sp.clicked.connect(self.split_here)
+        l.addWidget(sp, 0, Qt.AlignLeft)
+        self.join_box = QWidget()
+        self.join_box.setObjectName("transparent")
+        jl = QVBoxLayout(self.join_box)
+        jl.setContentsMargins(0, 4, 0, 0)
+        jl.setSpacing(6)
+        jl.addWidget(label("Joining on from the clip before", "cap"))
+        self.join_kind = Segmented([("cut", "Cut"), ("dissolve", "Crossfade"), ("black", "Through black")])
+        self.join_kind.changed.connect(lambda v: self._clip_set(transition=v))
+        jl.addWidget(self.join_kind)
+        r = QHBoxLayout()
+        r.addWidget(label("Takes", "cap"))
+        self.join_len = _slider(1, 30, 5)
+        self.join_len.valueChanged.connect(self._join_len_moved)
+        self.join_len.sliderReleased.connect(lambda: self.changed(frames=True))
+        r.addWidget(self.join_len, 1)
+        self.join_len_lbl = label("0.5 s", "mono")
+        self.join_len_lbl.setFixedWidth(44)
+        r.addWidget(self.join_len_lbl)
+        jl.addLayout(r)
+        ja = button("Use this for every join", "refresh", "ghost")
+        ja.clicked.connect(self._join_all)
+        jl.addWidget(ja, 0, Qt.AlignLeft)
+        l.addWidget(self.join_box)
         rb = button("Remove from the edit", "trash", "dangerGhost")
         rb.clicked.connect(self.remove_clip)
         l.addWidget(rb)
@@ -397,6 +441,18 @@ class EditorPage(QWidget):
         self.trans_lbl.setFixedWidth(44)
         r.addWidget(self.trans_lbl)
         l.addLayout(r)
+        l.addWidget(label("Stop at the video's edges", "cap"))
+        r = QHBoxLayout()
+        self.lock = QComboBox()
+        for k, v in (("off", "No: it can go past them"), ("all", "All edges"), ("tb", "Top and bottom"),
+                     ("lr", "Left and right")):
+            self.lock.addItem(v, k)
+        self.lock.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.lock.setMinimumContentsLength(10)
+        self.lock.setToolTip("The box stops at these edges of the video (snaps to them) instead of going past them")
+        self.lock.activated.connect(lambda _i: self._lock_changed(self.lock.currentData()))
+        r.addWidget(self.lock, 1)
+        l.addLayout(r)
         self.keep_shape = QCheckBox("Keep the box the finished shape")
         self.keep_shape.setToolTip("Off: the box can be any shape; it's fitted in without stretching and the rest "
                                    "is filled")
@@ -419,11 +475,21 @@ class EditorPage(QWidget):
                      "to the end of the video.")
         b.clicked.connect(lambda: self.track("crop", "crop"))
         l.addWidget(b)
-        self.crop_section = button("Keep this box for the marked part", "check")
-        self.crop_section.setToolTip("Fix a stretch the following got wrong: put the box right at the playhead, mark "
-                                     "the part, then use this. Before and after stay as they were.")
-        self.crop_section.clicked.connect(lambda: self._keep_for_part("crop", "crop"))
+        l.addWidget(label("Only part of the video", "h2"))
+        self.only_part = QCheckBox("Changes apply only to the marked part")
+        self.only_part.setChecked(True)
+        self.only_part.setToolTip("With a part marked and the playhead in it, moving the box changes it for that part "
+                                  "only: it glides in at the start and back out at the end")
+        l.addWidget(self.only_part)
+        self.crop_section = button("Zoom in on the marked part", "plus")
+        self.crop_section.setToolTip("The rest of the video stays as it is; this part zooms in (then move or resize "
+                                     "the box with the playhead in the part)")
+        self.crop_section.clicked.connect(self._zoom_part)
         l.addWidget(self.crop_section)
+        fix = button("Keep this box for the marked part", "check", "ghost")
+        fix.setToolTip("Fix a stretch the following got wrong: put the box right, mark the part, then use this")
+        fix.clicked.connect(lambda: self._keep_for_part("crop", "crop"))
+        l.addWidget(fix, 0, Qt.AlignLeft)
         d = button("Remove the move here", "minus", "ghost")
         d.clicked.connect(lambda: self._delete_key("crop", "crop"))
         l.addWidget(d, 0, Qt.AlignLeft)
@@ -560,6 +626,72 @@ class EditorPage(QWidget):
         l.addWidget(label("Colour changes show on the picture straight away.", "faint", wrap=True))
 
     def _sound_tool(self, l: QVBoxLayout) -> None:
+        l.addWidget(label("The videos' own sound", "cap"))
+        self.own = Segmented([("cut", "Cut with it"), ("whole", "Kept whole"), ("off", "Off")])
+        self.own.setToolTip("Cut with the picture: trims and cut-out parts cut the sound too. Kept whole: the sound "
+                            "plays on uncut, on its own line, to move and trim. Off: no sound from the videos.")
+        self.own.changed.connect(self._own_sound)
+        l.addWidget(self.own)
+        l.addWidget(label("Music and other sound", "h2"))
+        r = QHBoxLayout()
+        a1 = button("Add a song…", "library", "primary")
+        a1.setToolTip("A song from your library, sorted by how well it fits, played along with the sound there is")
+        a1.clicked.connect(lambda: self.add_song(replace=False))
+        r.addWidget(a1)
+        a2 = button("Replace the sound…", "library")
+        a2.setToolTip("A song from your library instead of the videos' own sound")
+        a2.clicked.connect(lambda: self.add_song(replace=True))
+        r.addStretch(1)
+        l.addLayout(r)
+        l.addWidget(a2, 0, Qt.AlignLeft)
+        a3 = button("Add a sound file…", "plus", "ghost")
+        a3.clicked.connect(self.add_sound_file)
+        l.addWidget(a3, 0, Qt.AlignLeft)
+        self.layer_list = QListWidget()
+        self.layer_list.setMaximumHeight(96)
+        self.layer_list.currentRowChanged.connect(self._layer_row)
+        l.addWidget(self.layer_list)
+        self.layer_box = QWidget()
+        self.layer_box.setObjectName("transparent")
+        ll = QVBoxLayout(self.layer_box)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(6)
+        self.layer_when = label("", "faint", wrap=True)
+        ll.addWidget(self.layer_when)
+        ll.addWidget(label("Which part of it plays (drag the handles):", "cap"))
+        self.layer_trim = RangeWave()
+        self.layer_trim.setMinimumHeight(70)
+        self.layer_trim.rangeChanged.connect(self._layer_trimmed)
+        ll.addWidget(self.layer_trim)
+        self.layer_sliders = {}
+        for key, name, lo, hi, scale, unit in (("gain_db", "Volume", -48, 24, 2, "dB"), ("fade_in", "Fade in", 0, 100, 10, "s"),
+                                               ("fade_out", "Fade out", 0, 100, 10, "s")):
+            r = QHBoxLayout()
+            lb = label(name, "cap")
+            lb.setFixedWidth(64)
+            r.addWidget(lb)
+            sl = _slider(lo, hi, 0)
+            sl.valueChanged.connect(lambda v, k=key, sc=scale, u=unit: self._layer_moved(k, v / sc, u))
+            sl.sliderReleased.connect(lambda: self.changed())
+            r.addWidget(sl, 1)
+            val = label("", "mono")
+            val.setFixedWidth(60)
+            r.addWidget(val)
+            ll.addLayout(r)
+            self.layer_sliders[key] = (sl, scale, val, unit)
+        st = button("Starts at the playhead", "tri_down", "ghost")
+        st.clicked.connect(self._layer_here)
+        ll.addWidget(st, 0, Qt.AlignLeft)
+        self.layer_loop = QCheckBox("Loop to the end of the video")
+        self.layer_loop.toggled.connect(lambda v: self._layer_set(loop=v))
+        ll.addWidget(self.layer_loop)
+        rm = button("Remove this sound", "trash", "dangerGhost")
+        rm.clicked.connect(self.delete_selected)
+        ll.addWidget(rm, 0, Qt.AlignLeft)
+        ll.addWidget(label("Drag it along its line on the timeline to move it; drag its ends to trim it.", "faint",
+                           wrap=True))
+        l.addWidget(self.layer_box)
+        l.addWidget(label("Volume of the whole edit", "h2"))
         self.norm = QCheckBox("Even out the loudness")
         self.norm.setToolTip("Brings the whole edit to the same loudness as your song library (Settings > Song "
                              "volume), without letting it distort")
@@ -581,12 +713,12 @@ class EditorPage(QWidget):
         l.addLayout(r)
         l.addWidget(label("Louder or quieter parts", "h2"))
         l.addWidget(label("Mark a part (drag along the times above the clips, or Starts here / Ends here under the "
-                          "picture), then:", "muted", wrap=True))
+                          "picture), then make it:", "muted", wrap=True))
         r = QHBoxLayout()
-        lo = button("Make it louder", "plus")
+        lo = button("Louder", "plus")
         lo.clicked.connect(lambda: self._add_section(6.0))
         r.addWidget(lo)
-        qu = button("Make it quieter", "minus")
+        qu = button("Quieter", "minus")
         qu.clicked.connect(lambda: self._add_section(-6.0))
         r.addWidget(qu)
         r.addStretch(1)
@@ -874,8 +1006,10 @@ class EditorPage(QWidget):
         self.clip_list.blockSignals(True)
         self.clip_list.clear()
         for i, c in enumerate(self.p.clips):
-            it = QListWidgetItem(icon("film", C["acc"]), f"{Path(c.path).name}\n{fmt_time(c.length)}"
-                                 + ("  · trimmed" if c.length < c.duration - 0.05 else ""))
+            part = (f"{fmt_time(c.start)}–{fmt_time(c.out)} of it" if c.length < c.duration - 0.05
+                    else fmt_time(c.length))
+            join = {"dissolve": " · crossfades in", "black": " · fades in from black"}.get(c.transition, "") if i else ""
+            it = QListWidgetItem(icon("film", C["acc"]), f"{Path(c.path).name}\n{part}{join}")
             it.setData(Qt.UserRole, i)
             it.setToolTip(c.path)
             self.clip_list.addItem(it)
@@ -904,7 +1038,15 @@ class EditorPage(QWidget):
             self.angle_lbl.setText(f"{c.angle:+.1f}°" if c.angle else "0°")
             self.in_edit.setText(fmt_precise(c.start))
             self.out_edit.setText(fmt_precise(c.out))
-            self.clip_len.setText(f"Uses {fmt_precise(c.length)} of {fmt_precise(c.duration)}")
+            self.clip_len.setText(f"Uses {fmt_precise(c.start)} – {fmt_precise(c.out)} of {fmt_precise(c.duration)}")
+            self.join_box.setVisible(i > 0)
+            if i > 0:
+                self.join_kind.set_value(c.transition)
+                self.join_len.blockSignals(True)
+                self.join_len.setValue(int(round(c.transition_s * 10)))
+                self.join_len.blockSignals(False)
+                self.join_len_lbl.setText(f"{c.transition_s:.1f} s")
+                self.join_len.setEnabled(c.transition != "cut")
             self.clip_info.setText(f"{c.width}×{c.height}, {c.fps:g} fps" + ("" if c.has_audio else ", no sound") +
                                    (f", turned {c.rotate}°" if c.rotate else ""))
             if getattr(self, "_trim_loaded", None) != (c.path, c.duration):
@@ -928,9 +1070,10 @@ class EditorPage(QWidget):
         self.trans.blockSignals(False)
         self.trans_lbl.setText(f"{cr.transition:.1f} s" if cr.transition else "a cut")
         self.fill.set_value(cr.fill)
+        self.lock.setCurrentIndex(max(0, self.lock.findData(cr.lock)))
         self.fill_col.setStyleSheet(f"QPushButton {{ background: {cr.fill_colour}; border: 1px solid {C['line2']}; }}")
         self.fill_col.setEnabled(cr.fill == "colour")
-        self.crop_section.setEnabled(self.mark is not None and cr.enabled)
+        self.crop_section.setEnabled(self.mark is not None)
         OW, OH = p.output_size()
         moves = sum(1 for k in cr.keys[1:] if not (len(k) > 5 and k[5] == "l"))
         tracked = sum(1 for k in cr.keys if len(k) > 5 and k[5] == "l")
@@ -971,6 +1114,44 @@ class EditorPage(QWidget):
             val.setText(f"{v:.2f}")
         # sound
         snd = p.sound
+        self.own.set_value("cut" if snd.clip_sound else ("whole" if any(x.get("kind") == "original" for x in snd.layers)
+                                                           else "off"))
+        cur_layer = self._sel_layer()
+        self.layer_list.blockSignals(True)
+        self.layer_list.clear()
+        for x in snd.layers:
+            lo = Layer(**{k: v for k, v in x.items() if k in Layer.__dataclass_fields__})
+            it = QListWidgetItem(icon("library" if lo.kind == "song" else "film" if lo.kind == "original" else "volume",
+                                      C["acc"]), f"{lo.name or Path(lo.path).name}  ·  from {fmt_time(lo.at)}")
+            it.setData(Qt.UserRole, lo.id)
+            self.layer_list.addItem(it)
+            if cur_layer is not None and cur_layer.get("id") == lo.id:
+                self.layer_list.setCurrentItem(it)
+        self.layer_list.blockSignals(False)
+        self.layer_list.setVisible(bool(snd.layers))
+        self.layer_box.setVisible(cur_layer is not None)
+        if cur_layer is not None:
+            lo = Layer(**{k: v for k, v in cur_layer.items() if k in Layer.__dataclass_fields__})
+            self.layer_when.setText(f"{lo.name or Path(lo.path).name}: plays {fmt_precise(lo.src_start)} – "
+                                    f"{fmt_precise(lo.src_start + lo.length)} of it, starting at {fmt_precise(lo.at)} "
+                                    "in the edit" + (", looping" if lo.loop else ""))
+            for k, (sl, sc, val, unit) in self.layer_sliders.items():
+                v = getattr(lo, k)
+                sl.blockSignals(True)
+                sl.setValue(int(round(v * sc)))
+                sl.blockSignals(False)
+                val.setText(f"{v:+.1f} {unit}" if unit == "dB" else f"{v:.1f} {unit}")
+            self.layer_loop.blockSignals(True)
+            self.layer_loop.setChecked(lo.loop)
+            self.layer_loop.blockSignals(False)
+            if getattr(self, "_layer_wave", None) != (lo.path, lo.duration):
+                self._layer_wave = (lo.path, lo.duration)
+                self.layer_trim.set_audio(None, lo.duration)
+                key = f"edit-layer-{abs(hash(lo.path))}-{int(lo.duration * 1000)}"
+                workers.run_bg(compute_peaks, lo.path, key, int(min(8000, max(800, lo.duration * 20))),
+                               done=lambda pk, path=lo.path, d=lo.duration: self.layer_trim.set_audio(pk, d)
+                               if getattr(self, "_layer_wave", (None,))[0] == path else None)
+            self.layer_trim.set_range(lo.src_start, lo.src_start + lo.length)
         self.norm.blockSignals(True)
         self.norm.setChecked(snd.normalize)
         self.norm.blockSignals(False)
@@ -1182,13 +1363,27 @@ class EditorPage(QWidget):
 
     def _box_dragged(self, kind: str, iid: str, box, space: str) -> None:
         p = self.p
+        in_part = (self.mark is not None and self.only_part.isChecked()
+                   and self.mark[0] - 1e-6 <= self.t <= self.mark[1] + 1e-6)
         if kind == "crop":
-            set_key(p.crop.keys, self.t, box)
+            box = p.clamp_crop(box)
+            if in_part:                       # this part only: glides in at its start and back out after
+                if self._drag_keys is None:
+                    self._drag_keys = [list(k) for k in p.crop.keys]
+                p.crop.keys = [list(k) for k in self._drag_keys]
+                apply_section(p.crop.keys, self.mark[0], self.mark[1], box, p.crop.transition, p.duration)
+            else:
+                set_key(p.crop.keys, self.t, box)
         elif kind == "blur":
             b = next((x for x in p.blurs if x.id == iid), None)
             if b is not None:
                 nb = self._native(box, space, b.space)
-                if b.moving or len(b.keys) > 1:
+                if in_part and (b.moving or len(b.keys) > 1):
+                    if self._drag_keys is None:
+                        self._drag_keys = [list(k) for k in b.keys]
+                    b.keys = [list(k) for k in self._drag_keys]
+                    apply_section(b.keys, self.mark[0], self.mark[1], nb, p.crop.transition, p.duration)
+                elif b.moving or len(b.keys) > 1:
                     set_key(b.keys, self.t, nb)
                 else:                          # a still box: it just moves
                     b.keys[0][1:5] = list(nb)
@@ -1344,6 +1539,8 @@ class EditorPage(QWidget):
             before = self.p.to_json()
             if kind == "crop":
                 self.p.crop.keys = res["keys"]
+                for k in self.p.crop.keys:
+                    k[1:5] = list(self.p.clamp_crop(k[1:5]))
             else:
                 bb = next((x for x in self.p.blurs if x.id == iid), None)
                 if bb is None:
@@ -1392,6 +1589,23 @@ class EditorPage(QWidget):
         self.changed(before=before)
 
     def _range_dragged(self, kind: str, iid: str, a: float, b: float) -> None:
+        if kind == "layer":
+            x = next((y for y in self.p.sound.layers if y.get("id") == iid), None)
+            if x is None:
+                return
+            lo = Layer(**{k: v for k, v in x.items() if k in Layer.__dataclass_fields__})
+            end = self.p.layer_end(lo)
+            if abs((b - a) - (end - lo.at)) < 1e-6:                  # moved along
+                x["at"] = max(0.0, a)
+            elif abs(b - end) < 1e-6:                                   # its start trimmed
+                d = max(-lo.src_start, a - lo.at)
+                x["src_start"] = lo.src_start + d
+                x["at"] = lo.at + d
+            else:                                                       # its end trimmed
+                x["src_end"] = min(lo.duration, lo.src_start + (b - lo.at))
+                x["loop"] = False
+            self._live()
+            return
         if kind == "sound":
             sec = next((x for x in self.p.sound.sections if x.get("id") == iid), None)
             if sec is not None:
@@ -1442,6 +1656,8 @@ class EditorPage(QWidget):
             self.p.overlays = [o for o in self.p.overlays if o.id != iid]
         elif kind == "sound":
             self.p.sound.sections = [x for x in self.p.sound.sections if x.get("id") != iid]
+        elif kind == "layer":
+            self.p.sound.layers = [x for x in self.p.sound.layers if x.get("id") != iid]
         else:
             return
         self.sel = None
@@ -1668,6 +1884,229 @@ class EditorPage(QWidget):
         self.key = None
         self._sync_all()
 
+    def _drag_done(self) -> None:
+        self._drag_keys = None
+        self.changed()
+
+    # ---- pieces and joins -----------------------------------------------------------------------------------------
+    def _need_mark(self) -> bool:
+        if self.mark is None:
+            hub.toast.emit("Mark the part first: drag along the times above the timeline, or use Starts here and "
+                           "Ends here.", "info")
+            return False
+        return True
+
+    def cut_marked(self) -> None:
+        if self.p is None or not self._need_mark():
+            return
+        a, b = self.mark
+        if b - a >= self.p.duration - 0.05:
+            hub.toast.emit("That's the whole video: nothing would be left.", "info")
+            return
+        before = self.p.to_json()
+        self.p.cut_out(a, b)
+        self._set_mark(None)
+        self.changed(before=before, frames=True)
+        self.seek(min(a, self.p.duration))
+        hub.toast.emit(f"Cut out {fmt_precise(b - a)}. The parts either side now join (Clips: choose how).", "ok")
+
+    def keep_marked(self) -> None:
+        if self.p is None or not self._need_mark():
+            return
+        a, b = self.mark
+        before = self.p.to_json()
+        self.p.keep_only(a, b)
+        self._set_mark(None)
+        self.changed(before=before, frames=True)
+        self.seek(0.0)
+
+    def split_here(self) -> None:
+        if self.p is None:
+            return
+        before = self.p.to_json()
+        if self.p.split(self.t):
+            self.changed(before=before, frames=True)
+        else:
+            hub.toast.emit("Move the playhead into a clip (not right at its start or end) to split it there.", "info")
+
+    def _join_len_moved(self, v: int) -> None:
+        i = self._clip_i()
+        if i > 0:
+            self.p.clips[i].transition_s = v / 10
+            self.join_len_lbl.setText(f"{v / 10:.1f} s")
+
+    def _join_all(self) -> None:
+        i = self._clip_i()
+        if i <= 0:
+            return
+        c = self.p.clips[i]
+        before = self.p.to_json()
+        for x in self.p.clips[1:]:
+            x.transition, x.transition_s = c.transition, c.transition_s
+        self.changed(before=before, frames=True)
+
+    # ---- crop extras ----------------------------------------------------------------------------------------------
+    def _lock_changed(self, v: str) -> None:
+        before = self.p.to_json()
+        self.p.crop.lock = v
+        for k in self.p.crop.keys:
+            k[1:5] = list(self.p.clamp_crop(k[1:5]))
+        self.changed(before=before)
+
+    def _zoom_part(self) -> None:
+        if self.p is None or not self._need_mark():
+            return
+        before = self.p.to_json()
+        p = self.p
+        p.crop.enabled = True
+        a, b = self.mark
+        x, y, w, h = p.crop_box((a + b) / 2)
+        nw, nh = w * 0.7, h * 0.7
+        box = p.clamp_crop((x + (w - nw) / 2, y + (h - nh) / 2, nw, nh))
+        apply_section(p.crop.keys, a, b, box, p.crop.transition, p.duration)
+        self.changed(before=before)
+        self.seek((a + b) / 2)
+        hub.toast.emit("Zoomed in for the marked part. Move or resize the box with the playhead in the part.", "ok")
+
+    # ---- sound layers -------------------------------------------------------------------------------------------
+    def _sel_layer(self):
+        if self.p is None or not self.sel or self.sel[0] != "layer":
+            return None
+        return next((x for x in self.p.sound.layers if x.get("id") == self.sel[1]), None)
+
+    def _layer_row(self, row: int) -> None:
+        it = self.layer_list.item(row) if row >= 0 else None
+        if it is not None:
+            self._picked("layer", it.data(Qt.UserRole))
+
+    def _own_sound(self, v: str) -> None:
+        p = self.p
+        before = p.to_json()
+        snd = p.sound
+        snd.clip_sound = v == "cut"
+        if v != "whole":
+            snd.layers = [x for x in snd.layers if x.get("kind") != "original"]
+        elif not any(x.get("kind") == "original" for x in snd.layers):
+            seen = []
+            for i, c in enumerate(p.clips):
+                if c.path in seen or not c.has_audio:
+                    continue
+                seen.append(c.path)
+                lay = Layer(path=c.path, kind="original", name=f"{Path(c.path).name} (its own sound)",
+                            duration=c.duration, src_start=c.start, at=p.clip_offset(i), fade_in=0.0, fade_out=0.3)
+                snd.layers.append(dict(lay.__dict__))
+            if seen:
+                self.sel = ("layer", snd.layers[-len(seen)]["id"])
+        self.changed(before=before)
+
+    def add_song(self, replace: bool) -> None:
+        """A song from the library, chosen in the song picker (sorted by how well it fits this video)."""
+        if self.p is None:
+            return
+        from ..jobs import automusic as am
+        item = am.AutoItem(video=self.p.clips[0].path)
+        dur = self.p.duration
+
+        def analysed(_res=None):
+            item.duration = dur
+            from .song_picker import SongPicker
+            d = SongPicker(item, self)
+            if os.environ.get("NIRVASH_AUTO_DIALOGS") == "accept":      # tests
+                d._fill() if hasattr(d, "_fill") else None
+                d.chosen = d._sid(0) if d.table.rowCount() else None
+            elif not d.exec():
+                return
+            if d.chosen is None:
+                return
+            self._add_song_layer(int(d.chosen), replace, item)
+
+        self.queue.add("Looking at the video to pick songs", am.analyse_video, item, on_done=analysed,
+                       on_failed=lambda m: (hub.toast.emit(f"Couldn't look at the video ({m}); songs are sorted by "
+                                                           "length only.", "warn"), analysed()))
+
+    def _add_song_layer(self, sid: int, replace: bool, item=None) -> None:
+        from ..core.settings import get_settings
+        from ..jobs import automusic as am
+        r = get_db().song(sid)
+        if r is None or not Path(r["file_path"]).exists():
+            hub.toast.emit("That song's file is missing.", "warn")
+            return
+        offset = 0.0
+        if item is not None:
+            try:
+                song = next((x for x in am.load_songs() if x.id == sid), None)
+                offset = am.choose_offset(item, song) if song else 0.0
+            except Exception:
+                offset = 0.0
+        s = get_settings()
+        before = self.p.to_json()
+        lay = Layer(path=r["file_path"], kind="song", song_id=sid, name=r["title"] or Path(r["file_path"]).stem,
+                    duration=r["duration"] or 0.0, src_start=offset, at=0.0 if replace else self.t,
+                    gain_db=0.0 if replace else -6.0, fade_in=float(s.get("automusic.fade_in_s", 0.5)),
+                    fade_out=float(s.get("automusic.fade_out_s", 2.0)))
+        if replace:
+            self.p.sound.clip_sound = False
+            self.p.sound.layers = [x for x in self.p.sound.layers if x.get("kind") != "original"]
+        self.p.sound.layers.append(dict(lay.__dict__))
+        self.sel = ("layer", lay.id)
+        self.changed(before=before)
+        hub.toast.emit(f"{lay.name} " + ("replaces the sound." if replace else f"plays from {fmt_precise(lay.at)}, "
+                                         "6 dB quieter than full so the video's sound still comes through."), "ok")
+
+    def add_sound_file(self) -> None:
+        if self.p is None:
+            return
+        f, _ = QFileDialog.getOpenFileName(self, "Add a sound", "", "Sound or video (*.m4a *.mp3 *.wav *.flac *.ogg "
+                                           "*.opus *.aac *.mp4 *.mkv *.mov *.webm);;All files (*)")
+        if not f:
+            return
+        from ..media import ff
+        try:
+            pr = ff.probe(f)
+        except ff.FFError as e:
+            hub.toast.emit(f"Can't read it: {e}", "warn")
+            return
+        if pr.audio is None:
+            hub.toast.emit("That file has no sound.", "warn")
+            return
+        before = self.p.to_json()
+        lay = Layer(path=f, kind="file", name=Path(f).stem, duration=pr.duration, at=self.t)
+        self.p.sound.layers.append(dict(lay.__dict__))
+        self.sel = ("layer", lay.id)
+        self.changed(before=before)
+
+    def _layer_set(self, commit: bool = True, **kw) -> None:
+        x = self._sel_layer()
+        if x is None:
+            return
+        before = self.p.to_json()
+        x.update(kw)
+        if commit:
+            self.changed(before=before)
+        else:
+            self._live()
+
+    def _layer_moved(self, key: str, v: float, unit: str) -> None:
+        x = self._sel_layer()
+        if x is None:
+            return
+        x[key] = v
+        self.layer_sliders[key][2].setText(f"{v:+.1f} {unit}" if unit == "dB" else f"{v:.1f} {unit}")
+
+    def _layer_trimmed(self, a: float, b: float) -> None:
+        x = self._sel_layer()
+        if x is None:
+            return
+        x["src_start"] = a
+        x["src_end"] = 0.0 if b >= x["duration"] - 0.02 else b
+        self.timeline.update()
+        if not getattr(self, "_layer_commit", None):
+            self._layer_commit = QTimer(self, singleShot=True, interval=500, timeout=lambda: self.changed())
+        self._layer_commit.start()
+
+    def _layer_here(self) -> None:
+        self._layer_set(at=self.t)
+
     # ---- marking a part -----------------------------------------------------------------------------------------
     def _set_mark(self, mark) -> None:
         self.mark = tuple(mark) if mark else None
@@ -1677,7 +2116,7 @@ class EditorPage(QWidget):
                               else "none marked")
         self.mark_clear.setEnabled(self.mark is not None)
         if self.p is not None:
-            self.crop_section.setEnabled(self.mark is not None and self.p.crop.enabled)
+            self.crop_section.setEnabled(self.mark is not None)
 
     def _mark_at(self, which: str) -> None:
         if self.p is None:

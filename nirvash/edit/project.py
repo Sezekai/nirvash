@@ -40,6 +40,8 @@ class Clip:
     flip_v: bool = False
     angle: float = 0.0              # small straightening, degrees; the picture is zoomed so no corners show
     mute: bool = False
+    transition: str = "cut"         # how it joins on from the clip before: cut | dissolve | black
+    transition_s: float = 0.5
 
     @property
     def out(self) -> float:
@@ -122,9 +124,13 @@ def apply_section(keys: list[Key], a: float, b: float, box, transition: float, e
     keys[:] = new or [[0.0] + list(box) + ["h"]]
 
 
+LOCKS = {"off": "Free", "all": "Inside the video", "tb": "Top and bottom", "lr": "Left and right"}
+
+
 @dataclass
 class Crop:
     enabled: bool = False
+    lock: str = "off"               # keep the box inside the video's edges: off | all | tb (top/bottom) | lr
     aspect: str = "source"          # the finished video's shape ("source" = the same as the video)
     keep_shape: bool = True         # resizing the box keeps that shape (off: any shape, the rest is filled)
     fill: str = "blur"              # what fills the frame where the box doesn't: "blur" (a blurred copy) or "colour"
@@ -169,14 +175,41 @@ class Section:
 
 
 @dataclass
+class Layer:
+    """A sound on its own line of the timeline: a song from the library, a video's own sound kept whole, or any
+    sound file. It starts `at` seconds into the edit and plays src_start..src_end of its file."""
+    id: str = field(default_factory=new_id)
+    path: str = ""
+    kind: str = "song"              # song | original | file
+    song_id: int | None = None
+    name: str = ""
+    duration: float = 0.0           # the file's length
+    src_start: float = 0.0
+    src_end: float = 0.0            # 0 = to the end of the file
+    at: float = 0.0
+    gain_db: float = 0.0
+    fade_in: float = 0.5
+    fade_out: float = 2.0
+    loop: bool = False              # play again from its start until the edit ends
+
+    @property
+    def length(self) -> float:
+        end = self.src_end if self.src_end > 0 else self.duration
+        return max(0.0, end - self.src_start)
+
+
+@dataclass
 class Sound:
+    clip_sound: bool = True         # the videos' own sound, cut along with the picture
+    layers: list = field(default_factory=list)     # dicts of Layer
     normalize: bool = False         # bring the whole edit to the library's loudness (Settings > Song volume)
     gain_db: float = 0.0            # louder / quieter, the whole edit
     sections: list = field(default_factory=list)   # louder / quieter parts (dicts of Section)
     measured: list = field(default_factory=list)   # [signature, LUFS, true peak] of the edit's sound
 
     def is_neutral(self) -> bool:
-        return not self.normalize and abs(self.gain_db) < 0.05 and not self.sections
+        return (not self.normalize and abs(self.gain_db) < 0.05 and not self.sections and self.clip_sound
+                and not self.layers)
 
 
 @dataclass
@@ -213,21 +246,88 @@ class Project:
     version: int = 2
 
     # ---- timeline -----------------------------------------------------------------------
+    def overlap(self, i: int) -> float:
+        """How long clip i overlaps the one before it (a crossfade); 0 for cuts and fades through black."""
+        if i <= 0 or i >= len(self.clips):
+            return 0.0
+        c = self.clips[i]
+        if c.transition != "dissolve":
+            return 0.0
+        return max(0.0, min(c.transition_s, self.clips[i - 1].length / 2, c.length / 2))
+
+    def offsets(self) -> list[float]:
+        out, acc = [], 0.0
+        for i, c in enumerate(self.clips):
+            acc -= self.overlap(i)
+            out.append(acc)
+            acc += c.length
+        return out
+
     @property
     def duration(self) -> float:
-        return sum(c.length for c in self.clips)
+        if not self.clips:
+            return 0.0
+        return self.offsets()[-1] + self.clips[-1].length
 
     def clip_at(self, t: float) -> tuple[int, float]:
-        """Which clip plays at output time t, and the time inside its source file."""
-        acc = 0.0
-        for i, c in enumerate(self.clips):
-            if t < acc + c.length or i == len(self.clips) - 1:
-                return i, c.start + max(0.0, min(c.length, t - acc))
-            acc += c.length
-        return 0, 0.0
+        """Which clip plays at output time t (the later one during a crossfade), and the time in its file."""
+        offs = self.offsets()
+        i = 0
+        for j, off in enumerate(offs):
+            if t >= off - 1e-9:
+                i = j
+        c = self.clips[i]
+        return i, c.start + max(0.0, min(c.length, t - offs[i]))
 
     def clip_offset(self, i: int) -> float:
-        return sum(c.length for c in self.clips[:i])
+        return self.offsets()[i] if 0 <= i < len(self.clips) else self.duration
+
+    def fade(self, i: int, t: float) -> float:
+        """Brightness of clip i at output time t for fades through black (1 = untouched)."""
+        offs = self.offsets()
+        c = self.clips[i]
+        f = 1.0
+        if i > 0 and c.transition == "black":
+            h = max(0.01, min(c.transition_s / 2, c.length / 2))
+            f = min(f, (t - offs[i]) / h)
+        if i + 1 < len(self.clips) and self.clips[i + 1].transition == "black":
+            n = self.clips[i + 1]
+            h = max(0.01, min(n.transition_s / 2, c.length / 2))
+            f = min(f, (offs[i] + c.length - t) / h)
+        return max(0.0, min(1.0, f))
+
+    def split(self, t: float) -> bool:
+        """Cut the clip under t into two at t (both keep the same file). False if t is at a clip's edge."""
+        if not self.clips:
+            return False
+        i, src = self.clip_at(t)
+        c = self.clips[i]
+        if src - c.start < 0.05 or c.out - src < 0.05:
+            return False
+        a, b = copy.deepcopy(c), copy.deepcopy(c)
+        a.end = src
+        b.start, b.transition = src, "cut"
+        self.clips[i:i + 1] = [a, b]
+        return True
+
+    def cut_out(self, a: float, b: float) -> None:
+        """Remove output a..b from the clips (the parts either side are joined)."""
+        a, b = max(0.0, a), min(self.duration, b)
+        if b - a < 0.02:
+            return
+        self.split(b)
+        self.split(a)
+        offs = self.offsets()
+        keep = [c for c, off in zip(self.clips, offs) if not (off >= a - 0.06 and off + c.length <= b + 0.06)]
+        if keep:
+            self.clips = keep
+
+    def keep_only(self, a: float, b: float) -> None:
+        d = self.duration
+        if b < d - 0.02:
+            self.cut_out(b, d)
+        if a > 0.02:
+            self.cut_out(0.0, a)
 
     # ---- frame sizes ------------------------------------------------------------------------
     def canvas(self) -> tuple[int, int, float]:
@@ -258,6 +358,26 @@ class Project:
         if W / H > a:
             return _even(H * a), H
         return W, _even(W / a)
+
+    def clamp_crop(self, box, keep_shape: bool | None = None):
+        """Keep a crop box inside the video's locked edges (it slides up to the edge; if it's bigger than the video
+        that way, it's made smaller, keeping its shape when the shape is kept)."""
+        lock = self.crop.lock
+        if lock == "off":
+            return tuple(box)
+        x, y, w, h = box
+        keep = self.crop.keep_shape if keep_shape is None else keep_shape
+        if lock in ("all", "lr") and w > 1:
+            k = 1 / w
+            w, h = 1.0, (h * k if keep else h)
+        if lock in ("all", "tb") and h > 1:
+            k = 1 / h
+            h, w = 1.0, (w * k if keep else w)
+        if lock in ("all", "lr"):
+            x = min(1 - w, max(0.0, x))
+        if lock in ("all", "tb"):
+            y = min(1 - h, max(0.0, y))
+        return x, y, w, h
 
     def crop_box(self, t: float) -> tuple[float, float, float, float] | None:
         if not self.crop.enabled:
@@ -312,12 +432,20 @@ class Project:
 
     # ---- what kind of export it needs ---------------------------------------------------------------
     def sound_signature(self) -> str:
-        return json.dumps([[c.path, round(c.start, 3), round(c.out, 3), c.mute] for c in self.clips])
+        return json.dumps([[[c.path, round(c.start, 3), round(c.out, 3), c.mute, c.transition, c.transition_s]
+                            for c in self.clips], self.sound.clip_sound, self.sound.layers])
+
+    def layer_objs(self) -> list[Layer]:
+        return [Layer(**_known(Layer, x)) for x in self.sound.layers]
+
+    def layer_end(self, l: Layer) -> float:
+        return self.duration if l.loop else min(self.duration, l.at + l.length)
 
     def frame_effects(self) -> bool:
         """Anything that changes the picture itself (so the video must be re-encoded)."""
         return (self.crop.enabled or bool(self.blurs) or bool(self.overlays) or not self.colour.is_neutral()
-                or any(abs(c.angle) > 0.01 for c in self.clips))
+                or any(abs(c.angle) > 0.01 for c in self.clips)
+                or any(c.transition != "cut" for c in self.clips[1:]))
 
     def is_empty_edit(self) -> bool:
         return (not self.frame_effects() and len(self.clips) <= 1 and self.sound.is_neutral()
@@ -338,6 +466,7 @@ class Project:
         p.overlays = [Overlay(**_known(Overlay, o)) for o in d.get("overlays", [])]
         p.colour = Colour(**_known(Colour, d.get("colour", {})))
         p.sound = Sound(**_known(Sound, d.get("sound", {})))
+        p.sound.layers = [asdict(Layer(**_known(Layer, x))) for x in p.sound.layers]
         if d.get("version", 1) < 2 and p.crop.enabled:
             # 0.4.0 crops: the first box set the output size; keep that shape as the output shape
             W, H, _ = p.canvas()

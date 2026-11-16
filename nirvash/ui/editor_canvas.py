@@ -415,7 +415,9 @@ class Timeline(QWidget):
         for o in p.overlays:
             out.append(("overlay", o.id, Path(o.path).stem or "Overlay"))
         if p.sound.sections:
-            out.append(("sound", "", "Sound"))
+            out.append(("sound", "", "Louder/quieter"))
+        for x in p.sound.layers:
+            out.append(("layer", x.get("id"), x.get("name") or Path(x.get("path", "")).stem or "Sound"))
         return out
 
     def set_project(self, p: Project | None) -> None:
@@ -468,8 +470,9 @@ class Timeline(QWidget):
                        p.fontMetrics().elidedText(name, Qt.ElideRight, 62))
             sel = self.selected == (kind, iid)
             if kind == "clips":
+                offs = pr.offsets()
                 for i, c in enumerate(pr.clips):
-                    a, b = pr.clip_offset(i), pr.clip_offset(i) + c.length
+                    a, b = offs[i], offs[i] + c.length
                     col = QColor(stops[i % len(stops)])
                     col.setAlpha(150 if self.selected == ("clip", str(i)) else 90)
                     r = QRectF(self._x(a) + 1, y + 2, max(2.0, self._x(b) - self._x(a) - 2), self.LANE - 6)
@@ -479,6 +482,11 @@ class Timeline(QWidget):
                     p.setPen(QColor(C["text"]))
                     p.drawText(r.adjusted(4, 0, -2, 0), Qt.AlignVCenter | Qt.AlignLeft,
                                p.fontMetrics().elidedText(Path(c.path).name, Qt.ElideRight, int(r.width()) - 6))
+                    if i > 0 and c.transition != "cut":       # how it joins: a small mark on the join
+                        xj = self._x(a + (pr.overlap(i) / 2 if c.transition == "dissolve" else 0))
+                        p.setPen(QPen(QColor(C["text"]), 1.5))
+                        p.setBrush(QColor(C["ground"]) if c.transition == "black" else QColor(C["acc"]))
+                        p.drawEllipse(QPointF(xj, y + self.LANE / 2 - 1), 4, 4)
             elif kind == "crop":
                 mid = y + self.LANE / 2 - 1
                 p.setPen(QPen(QColor(C["acc"]), 1))
@@ -497,6 +505,21 @@ class Timeline(QWidget):
                     x = self._x(k[0])
                     p.drawPolygon([QPointF(x, y + 3), QPointF(x + 4, mid), QPointF(x, y + self.LANE - 5),
                                    QPointF(x - 4, mid)])
+            elif kind == "layer":
+                x = next((l for l in pr.layer_objs() if l.id == iid), None)
+                if x is None:
+                    continue
+                sel_l = self.selected == ("layer", iid)
+                col = QColor(C["pink"] if x.kind == "song" else C["teal"])
+                col.setAlpha(170 if sel_l else 100)
+                end = pr.layer_end(x)
+                r = QRectF(self._x(x.at), y + 2, max(3.0, self._x(end) - self._x(x.at)), self.LANE - 6)
+                p.setPen(QPen(QColor(C["text"]), 1.2) if sel_l else Qt.NoPen)
+                p.setBrush(col)
+                p.drawRoundedRect(r, 3, 3)
+                p.setPen(QColor(C["text"]))
+                p.drawText(r.adjusted(4, 0, -2, 0), Qt.AlignVCenter | Qt.AlignLeft,
+                           p.fontMetrics().elidedText(x.name or Path(x.path).name, Qt.ElideRight, int(r.width()) - 6))
             elif kind == "sound":
                 for sec in pr.sound.sections:
                     g = sec.get("gain_db", 0)
@@ -543,6 +566,8 @@ class Timeline(QWidget):
             return [(o.id, o.start, p.overlay_end(o)) for o in p.overlays]
         if kind == "sound":
             return [(s.get("id"), s["start"], s["end"]) for s in p.sound.sections]
+        if kind == "layer":
+            return [(l.id, l.at, p.layer_end(l)) for l in p.layer_objs()]
         return []
 
     def mousePressEvent(self, e):  # noqa: N802
@@ -558,7 +583,7 @@ class Timeline(QWidget):
             self.update()
             return
         lane = self._lane_at(pos.y())
-        if lane and lane[0] in ("blur", "overlay", "sound"):
+        if lane and lane[0] in ("blur", "overlay", "sound", "layer"):
             for iid, a, b in self._items(lane[0]):
                 if lane[0] != "sound" and iid != lane[1]:
                     continue
@@ -572,6 +597,10 @@ class Timeline(QWidget):
                 if xa <= pos.x() <= xb:
                     self.selected = (lane[0], iid)
                     self.picked.emit(lane[0], iid)
+                    if lane[0] == "layer":            # drag a sound along its line to move it
+                        self._drag = ("move", "layer", iid, self._t(pos.x()), a, b)
+                        self.update()
+                        return
                     break
         elif lane and lane[0] == "clips":
             i, _ = self.project.clip_at(self._t(pos.x()))
@@ -588,7 +617,7 @@ class Timeline(QWidget):
                 cur = Qt.IBeamCursor
             else:
                 lane = self._lane_at(pos.y())
-                if lane and lane[0] in ("blur", "overlay", "sound") and self.project is not None:
+                if lane and lane[0] in ("blur", "overlay", "sound", "layer") and self.project is not None:
                     for iid, a, b in self._items(lane[0]):
                         if (lane[0] == "sound" or iid == lane[1]) and \
                                 min(abs(pos.x() - self._x(a)), abs(pos.x() - self._x(b))) < 6:
@@ -597,6 +626,10 @@ class Timeline(QWidget):
             return
         if self._drag[0] == "seek":
             self.seek.emit(self._t(pos.x()))
+        elif self._drag[0] == "move":
+            _m, kind, iid, t0, a, b = self._drag
+            dt = max(-a, self._t(pos.x()) - t0)
+            self.rangeChanged.emit(kind, iid, a + dt, b + dt)
         elif self._drag[0] == "mark":
             t0, t1 = self._drag[1], self._t(pos.x())
             if abs(t1 - t0) > 0.05:
@@ -614,15 +647,16 @@ class Timeline(QWidget):
             self.rangeChanged.emit(kind, iid, a, b)
 
     def mouseReleaseEvent(self, e):  # noqa: N802
-        if self._drag and self._drag[0] == "edge":
+        if self._drag and self._drag[0] in ("edge", "move"):
             self.committed.emit()
         self._drag = None
 
 
 # ---- live preview ------------------------------------------------------------------------------------------------------
 class PreviewPlayer:
-    """Plays the edit in the canvas: ffmpeg decodes the clips at the preview size in a thread, frames are shown on
-    time (late ones skipped), and the sound plays alongside from the clip files."""
+    """Plays the edit in the canvas: the frames come from the same FrameSource the export uses (crossfades and fades
+    included), decoded in a thread at the preview size and shown on time (late ones skipped). The sound plays
+    alongside: the clips' own sound from the clip files, and each sound layer on its own player."""
 
     def __init__(self, canvas: FrameCanvas, audio_player, on_time, on_end):
         self.canvas = canvas
@@ -638,6 +672,8 @@ class PreviewPlayer:
         self.wall0 = 0.0
         self.size = (640, 360)
         self.clip_i = -1
+        self.layer_players: list = []
+        self._layer_timers: list[QTimer] = []
 
     def start(self, p: Project, t: float, size: tuple[int, int]) -> None:
         self.stop()
@@ -654,49 +690,39 @@ class PreviewPlayer:
         self.wall0 = 0.0
         self.clip_i = -1
         self.timer.start()
+        self._start_layers(t)
 
     def stop(self) -> None:
         self.playing = False
         self.timer.stop()
         self._stop.set()
-        if self.audio is not None:
-            try:
-                self.audio.pause()
-            except Exception:
-                pass
+        for tm in self._layer_timers:
+            tm.stop()
+        self._layer_timers = []
+        for pl in [self.audio] + self.layer_players:
+            if pl is not None:
+                try:
+                    pl.pause()
+                except Exception:
+                    pass
 
     def _decode(self, p: Project, t: float, size) -> None:
         W, H = size
         _w, _h, fps = p.canvas()
         fps = min(fps, 30.0)
-        n = W * H * 3
-        i, src_t = p.clip_at(t)
-        while i < len(p.clips) and not self._stop.is_set():
-            c = p.clips[i]
-            off = p.clip_offset(i)
-            proc = ff.popen(R.decode_cmd(p, i, src_t, W, H, fps, duration=c.out - src_t),
-                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            k = 0
-            try:
+        try:
+            for ft, frame in R.FrameSource(p, t, W, H, fps):
+                if self._stop.is_set():
+                    return
+                i = p.clip_at(ft)[0]
                 while not self._stop.is_set():
-                    buf = proc.stdout.read(n)
-                    if len(buf) < n:
+                    try:
+                        self.q.put((i, ft, frame), timeout=0.1)
                         break
-                    ft = off + (src_t - c.start) + k / fps
-                    k += 1
-                    frame = np.frombuffer(buf, np.uint8).reshape(H, W, 3).copy()
-                    while not self._stop.is_set():
-                        try:
-                            self.q.put((i, ft, frame), timeout=0.1)
-                            break
-                        except queue.Full:
-                            continue
-            finally:
-                proc.kill()
-                proc.wait()
-            i += 1
-            if i < len(p.clips):
-                src_t = p.clips[i].start
+                    except queue.Full:
+                        continue
+        except Exception:  # noqa: BLE001 - the preview just stops
+            pass
         if not self._stop.is_set():
             self.q.put(None)
 
@@ -706,21 +732,17 @@ class PreviewPlayer:
         now = time.monotonic()
         latest = None
         while True:
-            try:
-                item = self.q.queue[0] if self.q.queue else None
-            except IndexError:
-                item = None
-            if item is None:
-                if self.q.queue and self.q.queue[0] is None:
-                    self.stop()
-                    self.on_end()
-                    return
+            item = self.q.queue[0] if self.q.queue else "empty"
+            if item == "empty":
                 break
+            if item is None:
+                self.stop()
+                self.on_end()
+                return
             i, ft, frame = item
             if self.wall0 == 0.0:
                 self.wall0 = now - (ft - self.t0)
-            due = self.wall0 + (ft - self.t0)
-            if due > now:
+            if self.wall0 + (ft - self.t0) > now:
                 break
             latest = self.q.get_nowait()
         if latest is not None:
@@ -733,15 +755,49 @@ class PreviewPlayer:
 
     def _audio_for(self, i: int, t: float) -> None:
         c = self.p.clips[i]
-        if self.audio is None or c.mute or not c.has_audio:
-            if self.audio is not None:
-                self.audio.pause()
+        if self.audio is None:
+            return
+        if not self.p.sound.clip_sound or c.mute or not c.has_audio:
+            self.audio.pause()
             return
         src = c.start + (t - self.p.clip_offset(i))
         try:
             self.audio.load(c.path, play=True, start=src)
             # the edit's volume changes, in this clip file's own time
-            vol = R.volume_filter(self.p, offset=self.p.clip_offset(i) - c.start)
-            self.audio.set_audio_filter(vol)
+            self.audio.set_audio_filter(R.volume_filter(self.p, offset=self.p.clip_offset(i) - c.start))
         except Exception:
             pass
+
+    def _start_layers(self, t: float) -> None:
+        from .player import Player
+        layers = self.p.layer_objs()
+        while len(self.layer_players) < len(layers):
+            self.layer_players.append(Player(self.canvas, video=False))
+        for pl, l in zip(self.layer_players, layers):
+            end = self.p.layer_end(l)
+            if t >= end or l.length <= 0:
+                continue
+            gain = l.gain_db + self.p.sound.gain_db + R.norm_gain(self.p)
+
+            def go(pl=pl, l=l, tt=None):
+                if not self.playing:
+                    return
+                now_t = tt if tt is not None else l.at
+                into = max(0.0, now_t - l.at)
+                if l.loop and l.length > 0:
+                    into %= l.length
+                try:
+                    pl.load(l.path, play=True, start=l.src_start + into)
+                    pl.set_gain_db(gain)
+                except Exception:
+                    pass
+            if l.at <= t:
+                go(tt=t)
+            else:
+                tm = QTimer(singleShot=True, interval=int((l.at - t) * 1000), timeout=go)
+                tm.start()
+                self._layer_timers.append(tm)
+            if not l.loop:                         # stop where its trimmed part ends
+                tm = QTimer(singleShot=True, interval=int(max(0.0, end - t) * 1000), timeout=pl.pause)
+                tm.start()
+                self._layer_timers.append(tm)

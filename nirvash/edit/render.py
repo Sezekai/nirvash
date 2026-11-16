@@ -100,18 +100,86 @@ def decode_cmd(p: Project, i: int, src_t: float, W: int, H: int, fps: float | No
     return args
 
 
+class FrameSource:
+    """The edit's pictures one after another from t0, at W x H and `fps`: each clip decoded by ffmpeg as it comes
+    up, crossfades blended (both clips decoded at once), fades through black applied."""
+
+    def __init__(self, p: Project, t0: float, W: int, H: int, fps: float, end: float | None = None):
+        self.p, self.t0, self.W, self.H, self.fps = p, max(0.0, t0), W, H, fps
+        self.end = p.duration if end is None else min(end, p.duration)
+        self.offs = p.offsets()
+        self.dec: dict[int, dict] = {}
+        self.n = W * H * 3
+
+    def _frame(self, i: int, t: float) -> np.ndarray:
+        d = self.dec.get(i)
+        if d is None:
+            c = self.p.clips[i]
+            src = c.start + max(0.0, t - self.offs[i])
+            proc = ff.popen(decode_cmd(self.p, i, src, self.W, self.H, self.fps, duration=max(0.05, c.out - src)),
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            d = self.dec[i] = {"proc": proc, "last": None}
+        buf = d["proc"].stdout.read(self.n)
+        if len(buf) < self.n:                       # a clip a frame short: hold its last picture
+            return d["last"] if d["last"] is not None else np.zeros((self.H, self.W, 3), np.uint8)
+        f = np.frombuffer(buf, np.uint8).reshape(self.H, self.W, 3).copy()
+        d["last"] = f
+        return f
+
+    def _close(self, i: int) -> None:
+        d = self.dec.pop(i, None)
+        if d is not None:
+            d["proc"].kill()
+            d["proc"].wait()
+
+    def close(self) -> None:
+        for i in list(self.dec):
+            self._close(i)
+
+    def __iter__(self):
+        import cv2
+        p, offs = self.p, self.offs
+        k = 0
+        try:
+            while True:
+                t = self.t0 + k / self.fps
+                if t >= self.end - 1e-6:
+                    break
+                active = [i for i, c in enumerate(p.clips) if offs[i] - 1e-9 <= t < offs[i] + c.length]
+                if not active:
+                    active = [len(p.clips) - 1]
+                for i in list(self.dec):
+                    if i < active[0]:
+                        self._close(i)
+                frames = []
+                for i in active:
+                    f = self._frame(i, t)
+                    fa = p.fade(i, t)
+                    if fa < 0.999:
+                        f = cv2.convertScaleAbs(f, alpha=fa)
+                    frames.append((i, f))
+                if len(frames) == 1:
+                    img = frames[0][1]
+                else:                                   # a crossfade: the later clip comes in
+                    (ia, fa_), (ib, fb) = frames[-2], frames[-1]
+                    ov = max(1e-3, p.overlap(ib))
+                    w = max(0.0, min(1.0, (t - offs[ib]) / ov))
+                    img = cv2.addWeighted(fa_, 1 - w, fb, w, 0)
+                yield t, img
+                k += 1
+        finally:
+            self.close()
+
+
 def grab(p: Project, t: float, W: int, H: int) -> np.ndarray | None:
     """The canvas picture (after per-clip work) at output time t, at W x H. None past the end or on an error."""
     if not p.clips:
         return None
-    i, st = p.clip_at(t)
-    clip = p.clips[i]
-    st = min(st, max(0.0, clip.out - 0.04))
-    proc = ff.run(decode_cmd(p, i, st, W, H, None, frames=1), timeout=60)
-    n = W * H * 3
-    if len(proc.stdout) < n:
-        return None
-    return np.frombuffer(proc.stdout[:n], np.uint8).reshape(H, W, 3).copy()
+    _w, _h, fps = p.canvas()
+    t = min(t, max(0.0, p.duration - 1.0 / fps))
+    for _t, img in FrameSource(p, t, W, H, fps):
+        return img
+    return None
 
 
 # ---- 2. the moving parts, in Python ---------------------------------------------------------------------------------
@@ -363,6 +431,8 @@ def lossless_plan(p: Project) -> str | None:
                      a.raw.get("channels") if a else None))
         if len(sig) != 1 or any(c.rotate or c.flip_h or c.flip_v or c.mute for c in p.clips):
             return None
+        if not p.sound.is_neutral():
+            return None
         return "join"
     return "single"
 
@@ -386,23 +456,69 @@ def keyframe_before(path: str, t: float) -> float:
 
 
 def _audio_args(p: Project, first_input: int, vol: str | None = None) -> tuple[list[str], list[str], list[str]]:
-    """Inputs, filter graph and maps for the joined sound (each clip's trimmed audio, silence where there's none),
-    with the edit's volume changes (`vol`, a filter working on the edit's time) at the end."""
-    clips = p.clips
-    if all(c.mute or not c.has_audio for c in clips):
-        return [], [], []
-    inputs, parts, graph = [], [], []
+    """Inputs, filter graph and maps for the edit's sound: the clips' own sound cut with the picture (crossfaded or
+    faded where the picture is), plus the sound layers (songs, a video's sound kept whole), mixed, as long as the
+    edit, with the volume changes (`vol`, working on the edit's time) at the end."""
+    clips, snd = p.clips, p.sound
+    inputs, graph, mix = [], [], []
     k = first_input
-    for j, c in enumerate(clips):
-        if c.has_audio and not c.mute:
-            inputs += ["-ss", f"{c.start:.3f}", "-t", f"{c.length:.3f}", "-i", c.path]
-            graph.append(f"[{k}:a:0]aresample=48000,aformat=channel_layouts=stereo,apad,atrim=0:{c.length:.3f},"
-                         f"asetpts=N/SR/TB[a{j}]")
-            k += 1
+    dur = p.duration
+    if snd.clip_sound and any(c.has_audio and not c.mute for c in clips):
+        for j, c in enumerate(clips):
+            fx = []
+            if j > 0 and c.transition == "black":
+                fx.append(f"afade=t=in:d={max(0.01, min(c.transition_s / 2, c.length / 2)):.3f}")
+            if j + 1 < len(clips) and clips[j + 1].transition == "black":
+                h = max(0.01, min(clips[j + 1].transition_s / 2, c.length / 2))
+                fx.append(f"afade=t=out:st={max(0.0, c.length - h):.3f}:d={h:.3f}")
+            tail = ("," + ",".join(fx)) if fx else ""
+            if c.has_audio and not c.mute:
+                inputs += ["-ss", f"{c.start:.3f}", "-t", f"{c.length:.3f}", "-i", c.path]
+                graph.append(f"[{k}:a:0]aresample=48000,aformat=channel_layouts=stereo,apad,atrim=0:{c.length:.3f},"
+                             f"asetpts=N/SR/TB{tail}[a{j}]")
+                k += 1
+            else:
+                graph.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{c.length:.3f},asetpts=N/SR/TB[a{j}]")
+        cur = "a0"
+        for j in range(1, len(clips)):
+            ov = p.overlap(j)
+            if ov > 0:
+                graph.append(f"[{cur}][a{j}]acrossfade=d={ov:.3f}:c1=tri:c2=tri[x{j}]")
+            else:
+                graph.append(f"[{cur}][a{j}]concat=n=2:v=0:a=1[x{j}]")
+            cur = f"x{j}"
+        mix.append(cur)
+    for n, l in enumerate(p.layer_objs()):
+        if not l.path or l.length <= 0.05 or l.at >= dur:
+            continue
+        play = (dur - l.at) if l.loop else min(l.length, dur - l.at)
+        if l.loop:
+            inputs += ["-i", l.path]
+            src = (f"[{k}:a:0]aresample=48000,aformat=channel_layouts=stereo,"
+                   f"atrim={l.src_start:.3f}:{l.src_start + l.length:.3f},asetpts=N/SR/TB,"
+                   f"aloop=loop=-1:size={int(l.length * 48000)},atrim=0:{play:.3f},asetpts=N/SR/TB")
         else:
-            graph.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{c.length:.3f},asetpts=N/SR/TB[a{j}]")
-        parts.append(f"[a{j}]")
-    graph.append("".join(parts) + f"concat=n={len(clips)}:v=0:a=1,{vol or 'anull'}[aout]")
+            inputs += ["-ss", f"{l.src_start:.3f}", "-t", f"{play:.3f}", "-i", l.path]
+            src = f"[{k}:a:0]aresample=48000,aformat=channel_layouts=stereo,asetpts=N/SR/TB"
+        k += 1
+        fx = [f"volume={l.gain_db:.2f}dB"]
+        if l.fade_in > 0.01:
+            fx.append(f"afade=t=in:d={min(l.fade_in, play / 2):.3f}")
+        if l.fade_out > 0.01:
+            fo = min(l.fade_out, play / 2)
+            fx.append(f"afade=t=out:st={max(0.0, play - fo):.3f}:d={fo:.3f}")
+        ms = int(round(l.at * 1000))
+        if ms > 0:
+            fx.append(f"adelay={ms}|{ms}")
+        graph.append(src + "," + ",".join(fx) + f"[L{n}]")
+        mix.append(f"L{n}")
+    if not mix:
+        return [], [], []
+    if len(mix) == 1:
+        graph.append(f"[{mix[0]}]apad,atrim=0:{dur:.3f},{vol or 'anull'}[aout]")
+    else:
+        graph.append("".join(f"[{m}]" for m in mix) + f"amix=inputs={len(mix)}:normalize=0:duration=longest,"
+                     f"apad,atrim=0:{dur:.3f},{vol or 'anull'}[aout]")
     return inputs, ["-filter_complex", ";".join(graph)], ["-map", "[aout]", "-c:a", "aac", "-b:a", "320k"]
 
 
@@ -507,14 +623,24 @@ def _export_copy(ctx, p: Project, tmp: Path, plan: str) -> str:
                 args += ["-display_vflip:v:0"]
         if start > 0:
             args += ["-ss", f"{start:.3f}"]
-        args += ["-i", c.path, "-t", f"{c.out - start:.3f}", "-map", "0:v:0"]
-        vol = volume_filter(p)
-        if c.has_audio and not c.mute:
-            args += ["-map", "0:a:0"]
-        if vol and c.has_audio and not c.mute:          # the picture is copied; only the sound is re-encoded
-            args += ["-af", vol, "-c:v", "copy", "-c:a", "aac", "-b:a", "320k"]
-        else:
+        args += ["-i", c.path]
+        if p.sound.is_neutral() or (not c.has_audio and not p.sound.layers):
+            args += ["-t", f"{c.out - start:.3f}", "-map", "0:v:0"]
+            if c.has_audio and not c.mute:
+                args += ["-map", "0:a:0"]
             args += ["-c", "copy"]
+        else:
+            # the picture is copied; the sound (with its changes and layers) is made fresh to match it
+            q = p.copy()
+            q.clips[0].start = start                 # the copy starts at that keyframe, so the sound does too
+            d = c.start - start
+            for l in q.sound.layers:
+                l["at"] = l["at"] + d
+            if len(p.sound.measured) >= 3 and p.sound.measured[0] == p.sound_signature():
+                q.sound.measured = [q.sound_signature()] + list(p.sound.measured[1:])
+            a_in, a_graph, a_maps = _audio_args(q, 1, volume_filter(q, offset=-(c.start - start)))
+            args = args[:args.index("-i")] + ["-i", c.path] + a_in + a_graph
+            args += ["-t", f"{c.out - start:.3f}", "-map", "0:v:0"] + a_maps + ["-c:v", "copy"]
         args += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(tmp)]
         ff.run_with_progress(args, c.out - start, lambda f: ctx.progress(0.02 + 0.95 * f, "Copying the video"),
                              ctx.cancel)
@@ -558,42 +684,20 @@ def _export_render(ctx, p: Project, tmp: Path) -> str:
     err: list[bytes] = []
     threading.Thread(target=lambda: err.append(eproc.stderr.read()), daemon=True).start()
     done = 0
-    n = W * H * 3
     t_start = time.time()
     try:
-        for i, clip in enumerate(p.clips):
-            off = p.clip_offset(i)
-            nf = int(round(clip.length * fps))
-            dproc = ff.popen(decode_cmd(p, i, clip.start, W, H, fps, duration=clip.length),
-                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            got = 0
-            last = None
-            try:
-                while got < nf:
-                    ctx.check()
-                    buf = dproc.stdout.read(n)
-                    if len(buf) < n:
-                        if last is None:
-                            break
-                        frame = last.copy()          # pad a short clip with its last frame
-                    else:
-                        frame = np.frombuffer(buf, np.uint8).reshape(H, W, 3).copy()
-                        last = frame
-                    t = off + got / fps
-                    out = ops.render(frame, t)
-                    if out.shape[1] != OW or out.shape[0] != OH:
-                        import cv2
-                        out = cv2.resize(out, (OW, OH))
-                    eproc.stdin.write(np.ascontiguousarray(out).tobytes())
-                    got += 1
-                    done += 1
-                    if done % 10 == 0:
-                        rate = done / max(0.01, time.time() - t_start)
-                        ctx.progress(done / total_frames,
-                                     f"Frame {done} of {total_frames} · {rate:.0f} frames a second")
-            finally:
-                dproc.kill()
-                dproc.wait()
+        for t, frame in FrameSource(p, 0.0, W, H, fps):
+            ctx.check()
+            out = ops.render(frame, t)
+            if out.shape[1] != OW or out.shape[0] != OH:
+                import cv2
+                out = cv2.resize(out, (OW, OH))
+            eproc.stdin.write(np.ascontiguousarray(out).tobytes())
+            done += 1
+            if done % 10 == 0:
+                rate = done / max(0.01, time.time() - t_start)
+                ctx.progress(min(0.99, done / total_frames),
+                             f"Frame {done} of {total_frames} · {rate:.0f} frames a second")
         eproc.stdin.close()
         eproc.wait()
     except BaseException:

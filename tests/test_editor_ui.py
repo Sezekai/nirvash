@@ -166,3 +166,75 @@ def test_editor_screen(env, monkeypatch):
     page.key_next()
     assert abs(page.t - 1.04) < 0.01
     page.close()
+
+
+def test_editor_parts_joins_sound(env, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from nirvash.ui import theme
+    theme.apply(app)
+    monkeypatch.setenv("NIRVASH_AUTO_DIALOGS", "accept")
+    from nirvash.core.db import get_db
+    from nirvash.ui.editor_page import EditorPage
+    from nirvash.ui.jobqueue import get_queue
+    v = _video(env / "long.mp4", 320, 240, 10.0, 25)
+    page = EditorPage()
+    page.resize(1400, 820)
+    page.show()
+    page.open_files([str(v)])
+    # keep 0-2, 4-6, 8-10: cut out two marked parts; crossfade the joins
+    page._set_mark((6.0, 8.0))
+    page.cut_marked()
+    page._set_mark((2.0, 4.0))
+    page.cut_marked()
+    assert [(c.start, c.out) for c in page.p.clips] == [(0.0, 2.0), (4.0, 6.0), (8.0, 10.0)]
+    page.clip_list.setCurrentRow(1)
+    page.join_kind.changed.emit("dissolve")
+    page._join_all()
+    assert all(c.transition == "dissolve" for c in page.p.clips[1:]) and page.p.duration < 6.0
+    page.seek(1.0)
+    page.split_here()
+    assert len(page.p.clips) == 4
+    page.undo()
+    assert len(page.p.clips) == 3
+    # crop: locked to the edges; zoom in for a part only
+    page.set_tool("crop")
+    page.crop_on.setChecked(True)
+    page._lock_changed("all")
+    page.seek(0.5)
+    page._box_dragged("crop", "crop", (-0.3, 0.1, 0.5, 0.5), "video")
+    page._drag_done()
+    assert page.p.crop_box(0.5)[0] == 0.0
+    page._set_mark((2.0, 3.0))
+    page.seek(2.5)
+    page._zoom_part()
+    assert page.p.crop_box(2.5)[2] < 0.6 and page.p.crop_box(4.5)[2] > 0.45
+    page._box_dragged("crop", "crop", (0.1, 0.1, 0.4, 0.4), "video")
+    page._box_dragged("crop", "crop", (0.2, 0.2, 0.4, 0.4), "video")
+    page._drag_done()
+    assert page.p.crop_box(2.5)[:2] == (0.2, 0.2) and page.p.crop_box(4.8)[0] == 0.0
+    page._set_mark(None)
+    # sound: the video's own sound kept whole, moved; a song from the library added
+    page.set_tool("sound")
+    page.own.changed.emit("whole")
+    assert not page.p.sound.clip_sound and page.p.sound.layers[0]["kind"] == "original"
+    lid = page.p.sound.layers[0]["id"]
+    page._range_dragged("layer", lid, 1.0, 1.0 + (page.p.layer_end(page.p.layer_objs()[0]) - 0.0))
+    page.timeline.committed.emit()
+    assert page.p.sound.layers[0]["at"] == 1.0
+    song = env / "s.m4a"
+    sh("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=500:d=8", "-c:a", "aac", str(song))
+    sid = get_db().add_song(file_path=str(song), duration=8.0, title="Test song", id_status="found")
+    page._add_song_layer(sid, replace=True)
+    assert [x["kind"] for x in page.p.sound.layers] == ["song"] and page.p.sound.layers[0]["title" if False else "name"] == "Test song"
+    page._layer_moved("gain_db", -3.0, "dB")
+    page.changed()
+    # through the song picker (auto-answered) as well
+    page.add_song(replace=False)
+    assert wait_for(app, lambda: not get_queue().busy(), 60)
+    assert len(page.p.sound.layers) == 2, get_queue().last.result_text
+    # export it all
+    page.export()
+    assert wait_for(app, lambda: not get_queue().busy(), 120)
+    assert get_queue().last.state == "done", get_queue().last.result_text
+    page.close()

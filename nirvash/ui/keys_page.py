@@ -48,6 +48,7 @@ KEYS = [
         (["←", "→"], "One frame back / on"),
         (["Home", "End"], "Start / end of the edit"),
         (["I", "O"], "Trim: the clip starts / ends at the playhead"),
+        (["X"], "Split the clip at the playhead"),
         (["Delete"], "Remove the chosen blur box or overlay"),
         (["Ctrl+Z", "Ctrl+Y"], "Undo / redo"),
         (["H"], "Hide the side panels: just the picture and the timeline"),

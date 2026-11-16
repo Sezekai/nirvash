@@ -172,6 +172,12 @@ def shoot():
     ed.add_overlay(str(_lib[0]))
     ed._set_mark((2.0, 6.0))
     ed._add_section(6.0)
+    ed._set_mark((12.0, 14.0))
+    ed.cut_marked()
+    ed.clip_list.setCurrentRow(1)
+    ed.join_kind.changed.emit("dissolve")
+    _sid = db.q("SELECT id FROM songs ORDER BY id LIMIT 1")[0]["id"]
+    ed._add_song_layer(_sid, replace=False)
     ed.seek(9.0)
     ed.set_tool("crop")
     for width, height in ((1100, 720), (1440, 900), (1920, 1040)):
@@ -182,7 +188,7 @@ def shoot():
                 w.auto_page.table.selectRow(0)
             snap(f"{key}_{width}")
         w.go("editor")
-        for _tool in ("blur", "sound"):
+        for _tool in ("blur", "sound", "clip"):
             ed.set_tool(_tool)
             snap(f"editor_{_tool}_{width}")
         ed.set_tool("crop")

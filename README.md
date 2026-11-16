@@ -53,10 +53,13 @@ A simple, lossless-first video tool.
 
 - **Editor** (0.4) — open a video (or drop one in), add more to join them, and:
   - **Trim** each clip with handles on its sound wave (I / O at the playhead).
-  - **Join** clips in any order (drag them); mixed sizes and frame rates become the biggest size and the highest frame rate, nothing made smaller.
+  - **Keep parts, cut parts**: mark a part and **Cut it out** (or **Keep only it**); repeat for more parts and the rest join up. **Split at the playhead** (X) makes pieces to trim or remove.
+  - **Join** clips in any order (drag them), each join a **Cut**, **Crossfade** or **Through black** (0.1–3 s; "Use this for every join"). Mixed sizes and frame rates become the biggest size and the highest frame rate, nothing made smaller.
   - **Crop**: the box starts as the whole video, in the finished shape you pick (same as the video, 9:16, 1:1…). Go to a moment and move or resize it: it stays there until you move it again, gliding between positions (Moves take 0–3 s, 0 = a cut). Smaller zooms in; bigger zooms out, even past the edges. Nothing is stretched: where the box doesn't fill the frame, a blurred copy of the picture or a colour fills it. **Follow a subject** keeps the box on something; where it goes wrong, put the box right, mark that part and **Keep this box for the marked part**.
+  - **Crop extras**: stop the box at the video's edges (all, top and bottom, or left and right); **Zoom in on the marked part** (the rest stays as it is, gliding in and out); with a part marked, moving the box changes only that part.
   - **Turn, mirror, flip and straighten** each clip.
   - **Blur or pixelate** boxes or ovals, drawn on the picture, for part of the video or all of it. "On the frame" stays in the same spot of the finished (cropped) video; "On the picture" sticks to what's filmed, still, moved by hand, or following a subject.
+  - **Sound layers**: the videos' own sound cut with the picture, **kept whole** (on its own line to move and trim), or off; **add a song** from the library (sorted by how well it fits, starting at a good point) or **replace the sound** with one; add any sound file. Each layer can be moved along the timeline, trimmed, faded, looped and made louder or quieter.
   - **Sound**: even out the loudness (to your song library's level), louder or quieter overall, and louder or quieter parts (mark a part, then Make it louder / quieter).
   - **Mark a part** by dragging along the times above the timeline (or Starts here / Ends here): used to fix a stretch of a crop or blur, to follow only that part, and for louder or quieter parts.
   - **Start over…** throws away every edit of the video (Ctrl+Z brings it back while the editor is open).

@@ -279,3 +279,78 @@ def test_sound_even_out_and_parts(env):
     r = export(Ctx(), p)
     inside, outside = _db(r["path"], 2.3, 1.4), _db(r["path"], 4.3, 1.4)
     assert 8 < inside - outside < 12, (inside, outside)
+
+
+def test_pieces_and_transitions(env):
+    from nirvash.edit.project import Clip, Project, clip_from_file
+    from nirvash.edit.render import export
+    from nirvash.media import ff
+    # cutting parts out of one video: keep 0-2, 4-6, 8-10 of a 10 s video
+    p = Project(clips=[Clip("v.mp4", duration=10, width=320, height=240, fps=25)])
+    p.cut_out(8.0 - 2.0, 8.0)          # 6..8
+    p.cut_out(2.0, 4.0)
+    assert [(c.start, c.out) for c in p.clips] == [(0.0, 2.0), (4.0, 6.0), (8.0, 10.0)] and p.duration == 6.0
+    q = Project(clips=[Clip("v.mp4", duration=10, width=320, height=240, fps=25)])
+    q.keep_only(3.0, 7.5)
+    assert [(c.start, c.out) for c in q.clips] == [(3.0, 7.5)]
+    assert q.split(1.0) and len(q.clips) == 2 and q.clips[1].start == 4.0
+    # a crossfade overlaps the clips; through black doesn't
+    p.clips[1].transition, p.clips[1].transition_s = "dissolve", 1.0
+    assert p.duration == 5.0 and p.offsets() == [0.0, 1.0, 3.0]
+    p.clips[2].transition = "black"
+    assert p.fade(2, 3.0) == 0.0 and p.fade(1, 3.0 - 1e-9) < 0.01 and p.fade(2, 3.6) == 1.0
+    # exported: real video with both kinds
+    v = _video(env / "ten.mp4", 320, 240, 10.0, 25)
+    p = Project(clips=[clip_from_file(str(v))])
+    p.cut_out(2.0, 4.0)
+    p.cut_out(4.0, 6.0)                    # (6..8 of the source, now at 4..6)
+    assert len(p.clips) == 3
+    p.clips[1].transition, p.clips[1].transition_s = "dissolve", 1.0
+    p.clips[2].transition, p.clips[2].transition_s = "black", 1.0
+    r = export(Ctx(), p)
+    pr = ff.probe(r["path"])
+    assert abs(pr.duration - p.duration) < 0.15 and abs(p.duration - 5.0) < 1e-6
+    assert _frame(Path(r["path"]), p.offsets()[2] - 0.02).mean() < 25       # black between clips 2 and 3
+    assert _db(r["path"], 0.2, 1.0) > -40
+
+
+def test_sound_layers(env):
+    from nirvash.edit.project import Layer, Project, clip_from_file
+    from nirvash.edit.render import export
+    from dataclasses import asdict
+    silent = _video(env / "silent.mp4", 160, 120, 6.0, 25, audio=False)
+    song = env / "song.m4a"
+    sh("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=330:d=4", "-c:a", "aac", str(song))
+    p = Project(clips=[clip_from_file(str(silent))])
+    p.sound.layers.append(asdict(Layer(path=str(song), name="Song", duration=4.0, at=1.0, fade_in=0, fade_out=0)))
+    r = export(Ctx(), p)
+    assert r["how"].startswith("copied")                       # the picture is still copied
+    assert _db(r["path"], 0.1, 0.7) < -60 and _db(r["path"], 1.5, 2.0) > -30 and _db(r["path"], 5.3, 0.5) < -60
+    # looping fills to the end
+    p.sound.layers[0]["loop"] = True
+    r = export(Ctx(), p)
+    assert _db(r["path"], 5.3, 0.5) > -30
+    # the video's own sound kept whole and moved later by 1 s; the cut picture doesn't cut it
+    v = _video(env / "talk.mp4", 160, 120, 6.0, 25)
+    p = Project(clips=[clip_from_file(str(v))])
+    p.cut_out(1.0, 3.0)
+    p.sound.clip_sound = False
+    p.sound.layers.append(asdict(Layer(path=str(v), kind="original", duration=6.0, at=0.0, src_start=0.0,
+                                       src_end=4.0, fade_in=0, fade_out=0)))
+    r = export(Ctx(), p)
+    from nirvash.media import ff
+    assert abs(ff.probe(r["path"]).duration - 4.0) < 0.15 and _db(r["path"], 3.0, 0.8) > -35
+
+
+def test_crop_lock():
+    from nirvash.edit.project import Clip, Project
+    p = Project(clips=[Clip("v.mp4", duration=10, width=1920, height=1080, fps=25)])
+    p.crop.enabled = True
+    p.crop.lock = "all"
+    assert p.clamp_crop((-0.2, 0.9, 0.5, 0.5)) == (0.0, 0.5, 0.5, 0.5)
+    x, y, w, h = p.clamp_crop((-0.5, -0.5, 2.0, 2.0))
+    assert (w, h) == (1.0, 1.0) and (x, y) == (0.0, 0.0)
+    p.crop.lock = "tb"
+    assert p.clamp_crop((-0.2, 0.9, 0.5, 0.5)) == (-0.2, 0.5, 0.5, 0.5)
+    p.crop.lock = "lr"
+    assert p.clamp_crop((-0.2, 0.9, 0.5, 0.5)) == (0.0, 0.9, 0.5, 0.5)
